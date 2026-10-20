@@ -598,4 +598,3 @@ test("cli only tracks prompt or resume runs, does not impose a 30m default timeo
     assert.match(badCli.stderr, new RegExp(routerFlag));
   }
 });
-

@@ -6,8 +6,10 @@
 
 - Managed controls (`--model`/`-m`, `--effort`/`--reasoning-effort`, `--continue`/`-c`, `--prompt-file`, and named `--resume`/`-r`) are emitted once via `request.controls` instead of being duplicated by `nativeArgs` forwarding.
 - `exec --lanes` parses the lane list as a value option rather than a boolean flag.
-- `cli` preserves passthrough flags such as `--resume` instead of consuming them with the router option seed, and records every `cli` invocation as a tracked router job (`grokSessionId`, `resumeOf`, stored prompt/result/log, `status`/`result`/`cancel`).
-- Managed modes (`analyze`, `exec`, `rescue`, `adversarial-review`) read `--prompt-file <path>` when provided and pass the routed prompt to `grok` via a job prompt file.
+- `cli` preserves native passthrough flags such as `--resume` (instead of consuming them with the router option seed) and rejects router-only flags such as `--json`, `--background`, `--lean`, and `--best`.
+- `cli` tracks prompt and session-resume runs (`-p`/`--single`, `--prompt-file`, `--resume`/`-r`, `--continue`/`-c`, or a positional prompt) as router jobs with `Job ID` on stderr, stored prompt/result/log, `status`/`result`/`cancel`, and `write: true` when editing tools are enabled; non-prompt discovery/help subcommands (`cli --help`, `cli models`, etc.) stay untracked, and `cli` runs have no timeout unless `--timeout-ms` is supplied.
+- `--resume <jobId>` / `-r <jobId>` in both managed modes and `cli` translates a router job ID into the underlying Grok session ID in `grok`'s argv, links `resumeOf` turn by turn to the immediately previous router job ID, and prints `Resume of: <jobId>` in `status` and `result`.
+- Managed modes (`analyze`, `exec`, `rescue`, `adversarial-review`) read `--prompt-file <path>` when provided, pass the routed prompt to `grok` via a job prompt file, and report a clear error when `--prompt-file` is missing.
 - The MCP server answers initialize with one JSON line, and `.mcp.json` starts that server from the plugin directory. A session opened in another repo can connect.
 
 ## 0.3.7
