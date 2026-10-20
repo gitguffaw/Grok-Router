@@ -373,8 +373,19 @@ function classifyCliArgs(args, helpText) {
   return { helpOnly, mutating, unclassified, first };
 }
 
+const CLI_PARSE_CONFIG = {
+  valueOptions: ["cwd", "timeout-ms"],
+  booleanOptions: ["allow-mutating", "allow-dangerous"],
+  aliasMap: { C: "cwd" },
+  stopAtPositional: false
+};
+
+function parseCliInput(argv) {
+  return parseArgs(normalizeArgv(argv), CLI_PARSE_CONFIG);
+}
+
 async function handleCli(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
+  const { options, positionals } = parseCliInput(argv);
   const cwd = resolveCwd(options);
   const args = positionals;
   if (!args.length) {
