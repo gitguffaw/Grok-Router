@@ -35,7 +35,7 @@ if (argv[0] === "models") {
     process.stdout.write(readFixture("grok-models-help.txt"));
     process.exit(0);
   }
-  process.stdout.write(readFixture("grok-models.txt"));
+  process.stdout.write(process.env.GROK_FAKE_MODELS_TEXT || readFixture("grok-models.txt"));
   process.exit(0);
 }
 
@@ -60,6 +60,16 @@ if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
 const promptIndex = argv.indexOf("-p");
 const promptFileIndex = argv.indexOf("--prompt-file");
 if (promptIndex !== -1 || promptFileIndex !== -1) {
+  const modelFlagCount = argv.filter((arg) => arg === "-m" || arg === "--model" || arg.startsWith("--model=")).length;
+  if (modelFlagCount > 1) {
+    process.stderr.write("error: the argument '--model <MODEL>' cannot be used multiple times\n\nUsage: grok [OPTIONS] [PROMPT] [COMMAND]\n");
+    process.exit(2);
+  }
+  const resumeFlagCount = argv.filter((arg) => arg === "-r" || arg === "--resume" || arg.startsWith("--resume=")).length;
+  if (resumeFlagCount > 1) {
+    process.stderr.write("error: the argument '--resume [<SESSION_ID_OR_TITLE>]' cannot be used multiple times\n\nUsage: grok [OPTIONS] [PROMPT] [COMMAND]\n");
+    process.exit(2);
+  }
   const sleepMs = Number(process.env.GROK_FAKE_SLEEP_MS || 0);
   if (Number.isFinite(sleepMs) && sleepMs > 0) {
     process.stderr.write("fake grok working\n");
@@ -84,10 +94,21 @@ if (promptIndex !== -1 || promptFileIndex !== -1) {
     : fs.readFileSync(argv[promptFileIndex + 1], "utf8");
   const fail = process.env.GROK_FAKE_FAIL === "1";
   const text = process.env.GROK_FAKE_TEXT || `fake grok response for: ${String(prompt).slice(0, 80)}`;
+  let resumedSession = null;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--resume" || argv[i] === "-r") {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        resumedSession = next;
+      }
+    } else if (argv[i].startsWith("--resume=")) {
+      resumedSession = argv[i].slice("--resume=".length);
+    }
+  }
   const payload = {
     text,
     stopReason: "end_turn",
-    sessionId: process.env.GROK_FAKE_SESSION || "11111111-1111-4111-8111-111111111111",
+    sessionId: resumedSession || process.env.GROK_FAKE_SESSION || "11111111-1111-4111-8111-111111111111",
     requestId: "req-fake"
   };
   if (argv.includes("--json-schema")) {

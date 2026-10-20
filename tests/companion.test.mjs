@@ -201,3 +201,29 @@ for (const resumeFlag of ["--resume", "-r"]) {
     assert.equal(argv[argv.indexOf("--resume") + 1], session);
   });
 }
+
+test("exec --model grok-4.7-build-fast --effort xhigh --background emits model and effort once and completes", () => {
+  const tempDir = makeTempDir();
+  const modelsText = "You are logged in with grok.com.\n\nDefault model: grok-4.7-build-fast\n\nAvailable models:\n  * grok-4.7-build-fast (default)\n  - grok-4.6\n";
+  const started = runCompanion(
+    ["exec", "--model", "grok-4.7-build-fast", "--effort", "xhigh", "--background", "--json", "Reply only pong. Do not use tools or modify files."],
+    tempDir,
+    { GROK_FAKE_MODELS_TEXT: modelsText }
+  );
+  assert.equal(started.status, 0, started.stderr + started.stdout);
+  const startedJob = JSON.parse(started.stdout);
+  const waited = runCompanion(
+    ["status", "--wait", "--json", startedJob.id],
+    tempDir,
+    { GROK_FAKE_MODELS_TEXT: modelsText }
+  );
+  assert.equal(waited.status, 0, waited.stderr + waited.stdout);
+  const job = JSON.parse(waited.stdout);
+  assert.equal(job.status, "completed", JSON.stringify(job.result));
+  const { argv } = readArgv(tempDir);
+  assert.equal(argv.filter((arg) => arg === "-m" || arg === "--model").length, 1);
+  assert.equal(argv[argv.indexOf("-m") + 1], "grok-4.7-build-fast");
+  assert.equal(argv.filter((arg) => arg === "--reasoning-effort" || arg === "--effort").length, 1);
+  assert.equal(argv[argv.indexOf("--reasoning-effort") + 1], "xhigh");
+});
+
