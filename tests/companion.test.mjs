@@ -293,5 +293,71 @@ test("analyze --prompt-file reads the prompt from the file and runs the job", ()
   assert.ok(!argv.includes("-p"));
 });
 
+test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tracked as router jobs with resumeOf", () => {
+  const tempDir = makeTempDir();
+  const sid = "33333333-3333-4333-8333-333333333333";
+
+  const turn1 = runCompanion(
+    ["analyze", "Reply in one line with your model name."],
+    tempDir,
+    { GROK_FAKE_SESSION: sid }
+  );
+  assert.equal(turn1.status, 0, turn1.stderr + turn1.stdout);
+  const turn1IdMatch = turn1.stderr.match(/Job ID:\s+(\S+)/);
+  assert.ok(turn1IdMatch, `expected Job ID on stderr, got: ${turn1.stderr}`);
+  const turn1Id = turn1IdMatch[1];
+
+  const turn1Result = runCompanion(["result", turn1Id], tempDir);
+  assert.equal(turn1Result.status, 0, turn1Result.stderr);
+  assert.match(turn1Result.stdout, new RegExp(`Resume in Grok: grok --resume ${sid}`));
+
+  const cliTurn = runCompanion(
+    [
+      "cli",
+      "-r",
+      sid,
+      "-p",
+      "Quote the question I asked in the previous turn.",
+      "--tools",
+      "read_file,grep,list_dir",
+      "--output-format",
+      "json"
+    ],
+    tempDir
+  );
+  assert.equal(cliTurn.status, 0, cliTurn.stderr + cliTurn.stdout);
+  const cliIdMatch = cliTurn.stderr.match(/Job ID:\s+(\S+)/);
+  assert.ok(cliIdMatch, `expected tracked Job ID on cli stderr, got: ${cliTurn.stderr}`);
+  const cliJobId = cliIdMatch[1];
+
+  const statusAll = runCompanion(["status", "--all"], tempDir);
+  assert.equal(statusAll.status, 0, statusAll.stderr);
+  assert.match(statusAll.stdout, new RegExp(turn1Id));
+  assert.match(statusAll.stdout, new RegExp(cliJobId));
+
+  const cliStored = runCompanion(["result", "--json", cliJobId], tempDir);
+  assert.equal(cliStored.status, 0, cliStored.stderr);
+  const cliJob = JSON.parse(cliStored.stdout);
+  assert.equal(cliJob.id, cliJobId);
+  assert.equal(cliJob.status, "completed");
+  assert.equal(cliJob.grokSessionId, sid);
+  assert.equal(cliJob.resumeOf, turn1Id);
+  assert.equal(cliJob.request.userRequest, "Quote the question I asked in the previous turn.");
+  assert.ok(cliJob.rendered.includes("Quote the question I asked in the previous turn."));
+  assert.ok(cliJob.logFile && fs.existsSync(cliJob.logFile));
+
+  const analyzeResumed = runCompanion(
+    ["analyze", "--resume", sid, "--json", "Quote the question I asked in the previous turn."],
+    tempDir
+  );
+  assert.equal(analyzeResumed.status, 0, analyzeResumed.stderr + analyzeResumed.stdout);
+  const analyzeJob = JSON.parse(analyzeResumed.stdout);
+  assert.equal(analyzeJob.status, "completed");
+  assert.equal(analyzeJob.grokSessionId, sid);
+  assert.equal(analyzeJob.resumeOf, turn1Id);
+  assert.equal(analyzeJob.request.tools, "read_file,grep,list_dir");
+});
+
+
 
 
