@@ -382,3 +382,37 @@ test("exec --lanes with --prompt-file reads the prompt file for each lane", () =
     assert.ok(leaf.request.promptFile && fs.existsSync(leaf.request.promptFile));
   }
 });
+
+test("--prompt-file stores file contents in cli and reports a clear error when missing", () => {
+  const tempDir = makeTempDir();
+  const missing = path.join(tempDir, "missing-prompt.txt");
+  const missingManaged = runCompanion(["analyze", "--prompt-file", missing], tempDir);
+  assert.notEqual(missingManaged.status, 0);
+  assert.match(missingManaged.stderr, /Prompt file not found:/);
+  assert.equal(/ENOENT/.test(missingManaged.stderr), false);
+
+  const pf = path.join(tempDir, "cli-pf.txt");
+  fs.writeFileSync(pf, "Summarize the CLI prompt file.\n", "utf8");
+  const cliOk = runCompanion(["cli", "--prompt-file", pf, "--output-format", "json"], tempDir);
+  assert.equal(cliOk.status, 0, cliOk.stderr + cliOk.stdout);
+  const cliIdMatch = cliOk.stderr.match(/Job ID:\s+(\S+)/);
+  assert.ok(cliIdMatch);
+  const cliJob = JSON.parse(runCompanion(["result", "--json", cliIdMatch[1]], tempDir).stdout);
+  assert.equal(cliJob.request.prompt, "Summarize the CLI prompt file.");
+  assert.equal(cliJob.request.userRequest, "Summarize the CLI prompt file.");
+  assert.equal(cliJob.request.promptFile, path.resolve(tempDir, pf));
+
+  const missingCli = runCompanion(["cli", "--prompt-file", missing, "--output-format", "json"], tempDir);
+  assert.notEqual(missingCli.status, 0);
+  const missingCliId = missingCli.stderr.match(/Job ID:\s+(\S+)/);
+  if (missingCliId) {
+    const failedCliJob = JSON.parse(runCompanion(["result", "--json", missingCliId[1]], tempDir).stdout);
+    assert.notEqual(failedCliJob.request.prompt, missing);
+    assert.match(failedCliJob.request.prompt, /^\[prompt-file:/);
+    assert.equal(failedCliJob.request.promptFile, path.resolve(tempDir, missing));
+  } else {
+    assert.match(missingCli.stderr, /Prompt file not found:/);
+    assert.equal(/ENOENT/.test(missingCli.stderr), false);
+  }
+});
+

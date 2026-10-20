@@ -214,3 +214,23 @@ test("parseArgs only treats --prompt-file as satisfying hasLaterPositional when 
   assert.equal(nonRoutedCommand.options.opt, true);
   assert.equal(nonRoutedCommand.positionals[0], "arg");
 });
+
+test("buildRouterRequest gives a clear error when --prompt-file does not exist", () => {
+  const tempDir = makeTempDir();
+  const missing = path.join(tempDir, "does-not-exist.txt");
+  assert.throws(
+    () => buildRouterRequest({
+      mode: "analyze",
+      prompt: "",
+      options: { "prompt-file": missing },
+      catalog,
+      nativeControls
+    }),
+    (err) => {
+      assert.match(err.message, /Prompt file not found:/);
+      assert.ok(!/ENOENT/.test(err.message));
+      return true;
+    }
+  );
+});
+
