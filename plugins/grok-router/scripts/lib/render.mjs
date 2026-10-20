@@ -185,7 +185,7 @@ export function renderStoredJobResult(job) {
   if (job.logFile) {
     lines.push(`Job log: ${job.logFile}`);
   }
-  if (job.grokSessionId) {
+  if (job.grokSessionId && job.grokSessionId !== "unknown") {
     lines.push(`Resume in Grok: grok --resume ${job.grokSessionId}`);
   }
   if (job.resumeOf) {
