@@ -277,4 +277,21 @@ test("analyze/rescue --resume <SID> emit --resume once and cli --resume <SID> fo
   assert.equal(cliPayload.sessionId, initialSession);
 });
 
+test("analyze --prompt-file reads the prompt from the file and runs the job", () => {
+  const tempDir = makeTempDir();
+  const promptFile = path.join(tempDir, "pf.txt");
+  fs.writeFileSync(promptFile, "Reply with exactly the word PONG.\n", "utf8");
+  const result = runCompanion(["analyze", "--prompt-file", promptFile, "--json"], tempDir);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const job = JSON.parse(result.stdout);
+  assert.equal(job.status, "completed");
+  assert.equal(job.request.userRequest, "Reply with exactly the word PONG.");
+  assert.match(job.request.prompt, /Reply with exactly the word PONG\./);
+  assert.match(job.rendered, /Reply with exactly the word PONG\./);
+  const { argv } = readArgv(tempDir);
+  assert.equal(argv.filter((arg) => arg === "--prompt-file").length, 1);
+  assert.ok(!argv.includes("-p"));
+});
+
+
 
