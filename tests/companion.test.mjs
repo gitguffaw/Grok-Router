@@ -227,3 +227,54 @@ test("exec --model grok-4.7-build-fast --effort xhigh --background emits model a
   assert.equal(argv[argv.indexOf("--reasoning-effort") + 1], "xhigh");
 });
 
+test("analyze/rescue --resume <SID> emit --resume once and cli --resume <SID> forwards --resume unchanged", () => {
+  const tempDir = makeTempDir();
+  const initialSession = "22222222-2222-4222-8222-222222222222";
+  const turn1 = runCompanion(
+    ["analyze", "--json", "Reply in one line with your model name."],
+    tempDir,
+    { GROK_FAKE_SESSION: initialSession }
+  );
+  assert.equal(turn1.status, 0, turn1.stderr + turn1.stdout);
+  const turn1Job = JSON.parse(turn1.stdout);
+  const resultOut = runCompanion(["result", turn1Job.id], tempDir);
+  assert.equal(resultOut.status, 0, resultOut.stderr);
+  assert.match(resultOut.stdout, new RegExp(`Resume in Grok: grok --resume ${initialSession}`));
+
+  for (const [mode, prompt] of [
+    ["analyze", "Quote the question I asked in the previous turn."],
+    ["rescue", "Quote the question I asked in the previous turn. Diagnosis only."]
+  ]) {
+    const resumed = runCompanion([mode, "--resume", initialSession, "--json", prompt], tempDir);
+    assert.equal(resumed.status, 0, resumed.stderr + resumed.stdout);
+    const job = JSON.parse(resumed.stdout);
+    assert.equal(job.status, "completed");
+    assert.equal(job.grokSessionId, initialSession);
+    const { argv } = readArgv(tempDir);
+    assert.equal(argv.filter((arg) => arg === "--resume" || arg === "-r").length, 1);
+    assert.equal(argv[argv.indexOf("--resume") + 1], initialSession);
+  }
+
+  const cliResumed = runCompanion(
+    [
+      "cli",
+      "--resume",
+      initialSession,
+      "-p",
+      "Quote the question I asked in the previous turn.",
+      "--tools",
+      "read_file,grep,list_dir",
+      "--output-format",
+      "json"
+    ],
+    tempDir
+  );
+  assert.equal(cliResumed.status, 0, cliResumed.stderr + cliResumed.stdout);
+  const { argv: cliArgv } = readArgv(tempDir);
+  assert.equal(cliArgv.filter((arg) => arg === "--resume").length, 1);
+  assert.equal(cliArgv[cliArgv.indexOf("--resume") + 1], initialSession);
+  const cliPayload = JSON.parse(cliResumed.stdout.trim());
+  assert.equal(cliPayload.sessionId, initialSession);
+});
+
+
