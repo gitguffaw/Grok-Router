@@ -737,3 +737,16 @@ test("--continue and -c turns link into the resumeOf chain using the most recent
   const otherCwdJob = JSON.parse(runCompanion(["result", "--json", otherCwdId, "--cwd", otherCwd], tempDir).stdout);
   assert.equal(otherCwdJob.resumeOf, null);
 });
+
+test("status renders Grok session as 'not reported' instead of 'unknown' when a plain cli run finishes without a session ID", () => {
+  const tempDir = makeTempDir();
+  const plainTurn = runCompanion(["cli", "-p", "Plain output with no session ID."], tempDir);
+  assert.equal(plainTurn.status, 0, plainTurn.stderr + plainTurn.stdout);
+  const jobId = plainTurn.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(jobId);
+
+  const statusOut = runCompanion(["status", jobId], tempDir);
+  assert.equal(statusOut.status, 0, statusOut.stderr);
+  assert.match(statusOut.stdout, /Grok session: not reported/);
+  assert.equal(/Grok session: unknown/.test(statusOut.stdout), false);
+});
