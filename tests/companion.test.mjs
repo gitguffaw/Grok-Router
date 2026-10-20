@@ -358,6 +358,27 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(analyzeJob.request.tools, "read_file,grep,list_dir");
 });
 
-
-
-
+test("exec --lanes with --prompt-file reads the prompt file for each lane", () => {
+  const tempDir = makeTempDir();
+  const pf = path.join(tempDir, "lane-prompt.txt");
+  fs.writeFileSync(pf, "Implement the lane acceptance criteria.\n", "utf8");
+  const result = runCompanion(
+    ["exec", "--lanes", "alpha,beta", "--prompt-file", pf, "--best", "--json"],
+    tempDir
+  );
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const panel = JSON.parse(result.stdout);
+  assert.equal(panel.jobClass, "grok-panel");
+  assert.equal(panel.status, "completed");
+  assert.deepEqual(panel.lanes.map((lane) => lane.label), ["alpha", "beta"]);
+  for (const lane of panel.lanes) {
+    const leafResult = runCompanion(["result", "--json", lane.id], tempDir);
+    assert.equal(leafResult.status, 0, leafResult.stderr);
+    const leaf = JSON.parse(leafResult.stdout);
+    assert.equal(leaf.status, "completed");
+    assert.equal(leaf.request.userRequest, "Implement the lane acceptance criteria.");
+    assert.ok(leaf.request.prompt.includes("Implement the lane acceptance criteria."));
+    assert.ok(leaf.request.prompt.includes(`Lane: ${lane.label}.`));
+    assert.ok(leaf.request.promptFile && fs.existsSync(leaf.request.promptFile));
+  }
+});

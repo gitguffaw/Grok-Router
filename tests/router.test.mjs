@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { parseArgs } from "../plugins/grok-router/scripts/lib/args.mjs";
 import { buildGrokPrintArgs } from "../plugins/grok-router/scripts/lib/grok.mjs";
 import { classifyControls } from "../plugins/grok-router/scripts/lib/live-controls.mjs";
 import { parseGrokModels } from "../plugins/grok-router/scripts/lib/models.mjs";
 import { buildRouterRequest } from "../plugins/grok-router/scripts/lib/router.mjs";
+import { parseCommandInput, parseRoutedInput } from "../plugins/grok-router/scripts/grok-companion.mjs";
 import { helpText, makeTempDir } from "./helpers.mjs";
 
 const catalog = parseGrokModels(`Default model: grok-4.6
@@ -142,4 +144,73 @@ test("buildRouterRequest reads --prompt-file when inline prompt is omitted and d
   assert.ok(!request.nativeArgs.includes("--prompt-file"));
 });
 
+test("parseArgs only treats --prompt-file as satisfying hasLaterPositional when promptFileOption is configured and before --", () => {
+  const defaultParsed = parseArgs(["--resume", "hello", "--prompt-file", "pf.txt"], {
+    optionalValueOptions: ["resume"],
+    valueOptions: ["prompt-file"]
+  });
+  assert.equal(defaultParsed.options.resume, true);
+  assert.deepEqual(defaultParsed.positionals, ["hello"]);
 
+  const promptFileAfterDoubleDash = parseArgs(
+    ["--resume", "session-id", "--", "--prompt-file", "pf.txt"],
+    {
+      optionalValueOptions: ["resume"],
+      valueOptions: ["prompt-file"],
+      promptFileOption: "prompt-file",
+      stopAtPositional: true
+    }
+  );
+  assert.equal(promptFileAfterDoubleDash.options.resume, "session-id");
+  assert.equal(promptFileAfterDoubleDash.options["prompt-file"], undefined);
+  assert.deepEqual(promptFileAfterDoubleDash.positionals, ["--prompt-file", "pf.txt"]);
+
+  const promptFileInPositionalTailAfterDoubleDash = parseArgs(
+    ["--", "--prompt-file", "pf.txt"],
+    {
+      optionalValueOptions: ["resume"],
+      valueOptions: ["prompt-file"],
+      promptFileOption: "prompt-file",
+      stopAtPositional: false
+    }
+  );
+  assert.equal(promptFileInPositionalTailAfterDoubleDash.options["prompt-file"], undefined);
+  assert.deepEqual(promptFileInPositionalTailAfterDoubleDash.positionals, ["--prompt-file", "pf.txt"]);
+
+  const promptFileAsValueOfAnotherOption = parseArgs(
+    ["--resume", "Prompt literal", "--rules", "--prompt-file"],
+    {
+      optionalValueOptions: ["resume"],
+      valueOptions: ["prompt-file", "rules"],
+      promptFileOption: "prompt-file",
+      stopAtPositional: true
+    }
+  );
+  assert.equal(promptFileAsValueOfAnotherOption.options.resume, true);
+  assert.deepEqual(
+    promptFileAsValueOfAnotherOption.positionals,
+    ["Prompt literal", "--rules", "--prompt-file"]
+  );
+
+  const bareResumeWithPromptText = parseRoutedInput(
+    ["--resume", "Explain the auth flow"],
+    nativeControls
+  );
+  assert.equal(bareResumeWithPromptText.options.resume, true);
+  assert.deepEqual(bareResumeWithPromptText.positionals, ["Explain the auth flow"]);
+
+  const namedResumeWithPromptFile = parseRoutedInput(
+    ["--resume", "11111111-1111-4111-8111-111111111111", "--prompt-file", "pf.txt"],
+    nativeControls
+  );
+  assert.equal(namedResumeWithPromptFile.options.resume, "11111111-1111-4111-8111-111111111111");
+  assert.equal(namedResumeWithPromptFile.options["prompt-file"], "pf.txt");
+  assert.deepEqual(namedResumeWithPromptFile.positionals, []);
+
+  const nonRoutedCommand = parseCommandInput(
+    ["--opt", "arg", "--prompt-file", "pf.txt"],
+    { optionalValueOptions: ["opt"] }
+  );
+  assert.equal(nonRoutedCommand.options.opt, true);
+  assert.equal(nonRoutedCommand.positionals[0], "arg");
+});
