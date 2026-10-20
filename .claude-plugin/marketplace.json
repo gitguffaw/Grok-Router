@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Grok Router plugin for live model discovery, policy-backed Grok delegation, and tracked jobs.",
-    "version": "0.3.1"
+    "version": "0.3.8"
   },
   "plugins": [
     {
