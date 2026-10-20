@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { buildGrokPrintArgs } from "../plugins/grok-router/scripts/lib/grok.mjs";
 import { classifyControls } from "../plugins/grok-router/scripts/lib/live-controls.mjs";
 import { parseGrokModels } from "../plugins/grok-router/scripts/lib/models.mjs";
 import { buildRouterRequest } from "../plugins/grok-router/scripts/lib/router.mjs";
-import { helpText } from "./helpers.mjs";
+import { helpText, makeTempDir } from "./helpers.mjs";
 
 const catalog = parseGrokModels(`Default model: grok-4.6
 
@@ -123,4 +125,21 @@ test("managed model and effort selectors are emitted once in buildGrokPrintArgs 
     assert.ok(args.includes("--verbatim"));
   }
 });
+
+test("buildRouterRequest reads --prompt-file when inline prompt is omitted and does not duplicate --prompt-file in nativeArgs", () => {
+  const tempDir = makeTempDir();
+  const pf = path.join(tempDir, "pf.txt");
+  fs.writeFileSync(pf, "Reply with exactly the word PONG.\n", "utf8");
+  const request = buildRouterRequest({
+    mode: "analyze",
+    prompt: "",
+    options: { "prompt-file": pf },
+    catalog,
+    nativeControls
+  });
+  assert.equal(request.userRequest, "Reply with exactly the word PONG.");
+  assert.match(request.prompt, /Reply with exactly the word PONG\./);
+  assert.ok(!request.nativeArgs.includes("--prompt-file"));
+});
+
 
