@@ -457,17 +457,24 @@ function extractCliMetadata(args, cwd) {
       tools = token.slice("--tools=".length);
     }
   }
-  if (!prompt && promptFile) {
-    try {
-      prompt = fs.readFileSync(path.resolve(cwd, promptFile), "utf8").trim();
-    } catch {
-      prompt = promptFile;
+  let resolvedPromptFile = null;
+  if (promptFile) {
+    resolvedPromptFile = path.resolve(cwd, promptFile);
+    if (!fs.existsSync(resolvedPromptFile)) {
+      throw new Error(`Prompt file not found: ${resolvedPromptFile}`);
+    }
+    if (!prompt) {
+      try {
+        prompt = fs.readFileSync(resolvedPromptFile, "utf8").trim() || `[prompt-file: ${resolvedPromptFile}]`;
+      } catch (error) {
+        throw new Error(`Unable to read prompt file ${resolvedPromptFile}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }
   return {
     resume,
     prompt,
-    promptFile,
+    promptFile: resolvedPromptFile,
     model,
     effort,
     tools,
@@ -509,6 +516,7 @@ async function handleCli(argv) {
     write,
     tools: meta.tools,
     prompt: userRequest,
+    promptFile: meta.promptFile,
     userRequest,
     controls: {
       model: meta.model,
