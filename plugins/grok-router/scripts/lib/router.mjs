@@ -11,6 +11,8 @@ const MODE_CONFIG = {
   rescue: { workflow: "Rescue", write: null }
 };
 
+const MANAGED_CONTROL_OPTIONS = new Set(["model", "reasoning-effort", "effort", "continue"]);
+
 function requirePrompt(prompt, { allowEmpty = false } = {}) {
   if (!allowEmpty && !String(prompt ?? "").trim()) {
     throw new Error("Provide a prompt.");
@@ -130,20 +132,24 @@ export function buildRouterRequest({
     ? options.write !== false && options.write !== "false"
     : Boolean(config.write);
 
+  const modelSelector = options.model ?? options.m ?? null;
   let model = null;
-  if (options.best || options.model) {
+  if (options.best || modelSelector) {
     if (!catalog) {
       throw new Error("Model catalog is required to resolve --model / --best.");
     }
-    model = resolveModelSelector(catalog, options.model, { best: Boolean(options.best) });
+    model = resolveModelSelector(catalog, modelSelector, { best: Boolean(options.best) });
   }
-  const effort = options.effort ?? options["reasoning-effort"] ?? null;
+  const effort = options.effort ?? options["reasoning-effort"] ?? options.reasoning_effort ?? null;
   const tools = write ? null : toolsFor(mode, options);
   const resume = options.resume && options.resume !== true ? options.resume : null;
-  // A named resume is emitted by buildGrokPrintArgs through controls.
-  // Keep a bare --resume on the native path for the CLI session picker.
-  const nativeArgs = nativeArgsFromParsedOptions(options,
-    nativeControls.filter((control) => control.option !== "resume" || !resume));
+  // Managed controls (model, effort, continue, and named resume) are emitted
+  // by buildGrokPrintArgs through controls. Keep a bare --resume on the native
+  // path for the CLI session picker.
+  const nativeArgs = nativeArgsFromParsedOptions(
+    options,
+    nativeControls.filter((control) => !MANAGED_CONTROL_OPTIONS.has(control.option) && (control.option !== "resume" || !resume))
+  );
   const diffPreamble = diff?.text
     ? `\nSelected diff (\`${diff.command}\`):\n\n${diff.text}\n`
     : "";
