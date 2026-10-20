@@ -74,7 +74,7 @@ const PUBLIC_COMMANDS = [
 ];
 
 const ROUTER_PARSE_SEED = {
-  valueOptions: ["cwd", "model", "effort", "timeout-ms", "base", "scope", "tool", "prompt-file", "resume", "lanes", "lane"],
+  valueOptions: ["cwd", "model", "effort", "timeout-ms", "base", "scope", "tool", "resume", "lanes", "lane"],
   booleanOptions: [
     "json",
     "background",
@@ -172,11 +172,12 @@ function parseRoutedInput(argv, nativeControls) {
     }))
   ]);
   return parseCommandInput(argv, {
-    valueOptions: unique([...liveConfig.valueOptions, ...ROUTER_PARSE_SEED.valueOptions]),
+    valueOptions: unique([...liveConfig.valueOptions, ...ROUTER_PARSE_SEED.valueOptions, "prompt-file"]),
     booleanOptions: unique([...liveConfig.booleanOptions, ...ROUTER_PARSE_SEED.booleanOptions]),
     optionalValueOptions: liveConfig.optionalValueOptions,
     arrayOptions: unique([...(liveConfig.repeatableOptions ?? []), "tool"]),
-    aliasMap: { ...liveConfig.aliasMap, ...ROUTER_PARSE_SEED.aliasMap }
+    aliasMap: { ...liveConfig.aliasMap, ...ROUTER_PARSE_SEED.aliasMap },
+    promptFileOption: "prompt-file"
   });
 }
 
