@@ -435,7 +435,7 @@ function findPriorJobForResume(workspaceRoot, target, env = process.env) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
   return (
     jobs.find((job) => job.id === ref) ??
-    jobs.find((job) => job.grokSessionId === ref || job.request?.controls?.resume === ref) ??
+    jobs.find((job) => job.grokSessionId === ref) ??
     null
   );
 }
@@ -638,9 +638,15 @@ async function handleCli(argv) {
 
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const priorJob = findPriorJobForResume(workspaceRoot, meta.resume, env);
-  const priorSessionId = resolveKnownSessionId(workspaceRoot, priorJob, env);
-  const resumeSessionId = priorSessionId ?? (meta.resume && meta.resume !== true ? meta.resume : null);
-  if (priorSessionId && meta.resumeFlagIndex !== -1) {
+  const resumedByJobId = Boolean(priorJob && meta.resume === priorJob.id);
+  const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
+  if (resumedByJobId && !priorSessionId) {
+    throw new Error(`Job ${priorJob.id} has no known Grok session.`);
+  }
+  const resumeSessionId = resumedByJobId
+    ? priorSessionId
+    : (meta.resume && meta.resume !== true ? meta.resume : null);
+  if (resumedByJobId && priorSessionId && meta.resumeFlagIndex !== -1) {
     args[meta.resumeFlagIndex] = meta.resumeInlinePrefix
       ? `${meta.resumeInlinePrefix}${priorSessionId}`
       : priorSessionId;
@@ -812,8 +818,12 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
   const priorJob = options.resume && options.resume !== true
     ? findPriorJobForResume(workspaceRoot, options.resume, env)
     : null;
-  const priorSessionId = resolveKnownSessionId(workspaceRoot, priorJob, env);
-  if (priorSessionId && options.resume === priorJob?.id) {
+  const resumedByJobId = Boolean(priorJob && options.resume === priorJob.id);
+  const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
+  if (resumedByJobId && !priorSessionId) {
+    throw new Error(`Job ${priorJob.id} has no known Grok session.`);
+  }
+  if (resumedByJobId && priorSessionId) {
     options.resume = priorSessionId;
   }
   const models = readGrokModels(cwd, env);
