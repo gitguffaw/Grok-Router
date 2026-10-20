@@ -652,3 +652,44 @@ test("cli rejects router-only flags only in option position, never as flag value
   const afterDoubleDash = runCompanion(["cli", "-p", "Hello", "--output-format", "json", "--", "--lean"], tempDir);
   assert.equal(afterDoubleDash.status, 0, afterDoubleDash.stderr + afterDoubleDash.stdout);
 });
+
+test("cli write classification detects --yolo/--always-approve only as options and records write as unknown when --tools is omitted", () => {
+  const tempDir = makeTempDir();
+
+  // R3a: -p "--yolo" with read-only --tools must be write:false (not write:true)
+  const yoloPromptReadOnly = runCompanion(
+    ["cli", "-p", "--yolo", "--tools", "read_file,grep,list_dir", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(yoloPromptReadOnly.status, 0, yoloPromptReadOnly.stderr + yoloPromptReadOnly.stdout);
+  const yoloPromptId = yoloPromptReadOnly.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(yoloPromptId);
+  const yoloPromptJob = JSON.parse(runCompanion(["result", "--json", yoloPromptId], tempDir).stdout);
+  assert.equal(yoloPromptJob.request.prompt, "--yolo");
+  assert.equal(yoloPromptJob.write, false);
+  assert.equal(yoloPromptJob.request.write, false);
+
+  // R3b: when --tools is omitted and no --always-approve/--yolo is passed, grok's default tools can edit, so write is "unknown"
+  const noToolsRun = runCompanion(
+    ["cli", "-p", "Hello without tools flag", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(noToolsRun.status, 0, noToolsRun.stderr + noToolsRun.stdout);
+  const noToolsId = noToolsRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(noToolsId);
+  const noToolsJob = JSON.parse(runCompanion(["result", "--json", noToolsId], tempDir).stdout);
+  assert.equal(noToolsJob.write, "unknown");
+  assert.equal(noToolsJob.request.write, "unknown");
+
+  // Real --yolo option sets write:true
+  const realYoloRun = runCompanion(
+    ["cli", "--yolo", "-p", "Hello with yolo", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(realYoloRun.status, 0, realYoloRun.stderr + realYoloRun.stdout);
+  const realYoloId = realYoloRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(realYoloId);
+  const realYoloJob = JSON.parse(runCompanion(["result", "--json", realYoloId], tempDir).stdout);
+  assert.equal(realYoloJob.write, true);
+  assert.equal(realYoloJob.request.write, true);
+});
