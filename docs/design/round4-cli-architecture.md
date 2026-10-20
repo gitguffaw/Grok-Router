@@ -1,4 +1,4 @@
-# Round 4 Phase A Design: Single CLI Tokenizer and Session-Backed Ancestry (`lib/cli.mjs`)
+# Round 4 Phase A Design (Revised): Single CLI Tokenizer and Session-Backed Ancestry (`lib/cli.mjs`)
 
 ## 1. Premise Test
 
@@ -10,32 +10,37 @@
 
 **The premise does NOT hold.**
 
-1. **Why private hard-coded flag lists fail**:
-   - At head (`dbe13e0`), `grok-companion.mjs` scans the same `cli` argument array three times with three different grammars:
-     1. `parseCliInput` (`grok-companion.mjs:406-472`) walks `argv` using a static 33-entry `CLI_KNOWN_VALUE_FLAGS` set and a 4-entry `CLI_KNOWN_OPTIONAL_VALUE_FLAGS` set without consulting live `grok --help`.
+1. **Why private hard-coded flag lists fail (`A1`)**:
+   - At head (`dbe13e0`), `grok-companion.mjs` (1,238 lines) scans the same `cli` argument array three times with three different grammars:
+     1. `parseCliInput` (`grok-companion.mjs:409-472`) walks `argv` using a static 33-entry `CLI_KNOWN_VALUE_FLAGS` set and a 4-entry `CLI_KNOWN_OPTIONAL_VALUE_FLAGS` set without consulting live `grok --help`.
      2. `extractCliMetadata` (`grok-companion.mjs:553-677`) duplicates those exact two sets, extends them from `parseGrokHelp(helpText)`, and walks `args` a second time.
      3. `classifyCliArgs` (`grok-companion.mjs:371-379`) runs `args.includes("--help") || args.includes("-h")` across the raw array without option/value/positional boundaries.
    - Any divergence between those three passes produces a bug:
-     - Passing a router-named value to a flag that only exists in live `grok --help` (e.g., `--future-flag --best`) is recognized as a flag value by `extractCliMetadata` (which reads help) but rejected as a top-level router flag by `parseCliInput` (which does not read help).
+     - Passing a router-named value to a flag that only exists in live `grok --help` (e.g., `--custom-filter --best`) is recognized as a flag value by `extractCliMetadata` (which reads help) but rejected as a top-level router flag by `parseCliInput` (which runs before help is read).
      - Passing `--help` or `-h` as a prompt value (`cli -p "--help"`) or after `--` (`cli -p hi -- --help`) is treated as `helpOnly: true` by `classifyCliArgs`, skipping job tracking.
-2. **Why router job-record order fails for `--continue`**:
-   - `findPriorJobForContinue` (`grok-companion.mjs:498-505`) selects the newest job by `updatedAt` in any status (including `failed` jobs with `grokSessionId: null`, `running` jobs, and `grok-lane` leaves) before `grok` even runs, and compares `job.cwd` against `--cwd <subfolder>` even though managed modes (`runStoredJob` -> `runGrokPrintJob(workspaceRoot, ...)`) execute `grok` in `workspaceRoot`.
+     - Passing combined short flags (`cli -cp "hi"`) is unrecognized by all three passes and runs untracked.
+2. **Why router job-record order fails for `--continue` (`A2`)**:
+   - `findPriorJobForContinue` (`grok-companion.mjs:498-505`) selects the newest job by `updatedAt` in any status (including `failed` jobs with `grokSessionId: null`, `running` jobs, and `grok-lane` leaves whose `cwd` is `undefined` and falls back to `workspaceRoot`) before `grok` runs, and compares `job.cwd` against `--cwd <subfolder>` even though managed modes (`runStoredJob` -> `runGrokPrintJob(workspaceRoot, ...)`) execute `grok` in `workspaceRoot`.
 
 ---
 
-### Can a Single Tokenizer Be Built from `grok --help`?
+### Can a Single Tokenizer Be Built from `grok --help`? (`A-C`, `A-H`, `A-I`)
 
-**Yes.** `parseGrokHelp(helpText)` in `plugins/grok-router/scripts/lib/help.mjs` already parses clap-formatted `grok --help` output into structured flag and subcommand descriptors.
+**Yes, with an explicit supported-grammar contract and bounded fallback policy.**
 
-#### Help-Text Formats in the Repository
+#### Help-Text Formats in the Repository and Live Grok 1.0.60 (`A-H`)
 
 1. **Multi-line root help (`tests/fixtures/grok-help.txt`, 175 lines)**:
    ```text
    Options:
          --agent <NAME>
              Agent name or definition file path
+         --allow <RULE>
+             Permission allow rule (compat aliases: --allowedTools, --allowed-tools)
      -c, --continue
              Continue the most recent session for the current working directory
+         --deny <RULE>
+             Permission deny rule (compat alias: --disallowedTools)
      -m, --model <MODEL>
              Model ID to use
      -p, --single <PROMPT>
@@ -45,10 +50,6 @@
          --reasoning-effort <EFFORT>
              Reasoning effort for reasoning models
              [aliases: --effort]
-         --allow <RULE>
-             Permission allow rule (compat alias: --allowedTools)
-         --deny <RULE>
-             Permission deny rule (compat alias: --disallowedTools)
          --system-prompt-override <PROMPT>
              Override the agent's system prompt (compat alias: --system-prompt)
      -w, --worktree [<WORKTREE>]
@@ -57,6 +58,26 @@
              Branch, tag, or commit to base the worktree on (with `--worktree`). ...
              [aliases: --ref]
    ```
+   - **Live Grok 1.0.60 fixture drift (`A-H`)**: Live `grok 1.0.60 --help` prints `(compat aliases: --allowedTools, --allowed-tools)` (plural, comma-separated list) on `--allow` at line 17, while `tests/fixtures/grok-help.txt:17` had `(compat alias: --allowedTools)`.
+   - Phase B will refresh `tests/fixtures/grok-help.txt:17` to match live 1.0.60 and extend `parseAliases(text)` in `plugins/grok-router/scripts/lib/help.mjs` to extract both `[aliases: ...]` and singular/plural `/\(compat alias(?:es)?:\s*([^)]+)\)/gi` comma-separated lists:
+     ```js
+     function parseAliases(text) {
+       const raw = String(text ?? "");
+       const collected = [];
+       const bracket = raw.match(/\[aliases:\s*([^\]]+)\]/i);
+       if (bracket) {
+         collected.push(...bracket[1].split(","));
+       }
+       for (const compat of raw.matchAll(/\(compat alias(?:es)?:\s*([^)]+)\)/gi)) {
+         collected.push(...compat[1].split(","));
+       }
+       return unique(
+         collected
+           .map((item) => item.trim())
+           .filter((item) => item.startsWith("-"))
+       );
+     }
+     ```
 
 2. **Single-line subcommand help (`tests/fixtures/grok-models-help.txt`, 10 lines)**:
    ```text
@@ -67,270 +88,331 @@
          --leader-socket <PATH>  Use a custom leader socket path ...
    ```
 
-3. **Compat aliases in description text (`references/cli-surface.json` and `tests/fixtures/grok-help.txt`)**:
-   - `[aliases: --effort]` and `[aliases: --ref]` are already extracted by `parseAliases` in `lib/help.mjs:23-34`.
-   - Inline prose `(compat alias: --allowedTools)`, `(compat alias: --disallowedTools)`, and `(compat alias: --system-prompt)` appear in `grok-help.txt` lines 17, 35, 130. Extending `parseAliases` in `lib/help.mjs` (or the CLI grammar builder in `lib/cli.mjs`) to also match `/\(compat alias:\s*(--[a-z0-9-]+)\)/gi` derives `--allowedTools`, `--disallowedTools`, and `--system-prompt` directly from the help text instead of hard-coding them.
-   - Hidden short alias `-C` for `--cwd`: `grok --help` lists `--cwd <CWD>` without `-C`, and hidden `--yolo` is not printed in `grok --help`. Those belong in a tiny, explicit `FALLBACK_CLI_GRAMMAR` seed (used alongside live help and as the fallback when `grok --help` fails).
+#### Supported Help Grammar and Parse Warnings (`A-I`)
 
-#### Complete Flag & Arity Table Yielded from `tests/fixtures/grok-help.txt` + Compat Alias Extraction
+`parseGrokHelp(text)` in `plugins/grok-router/scripts/lib/help.mjs` will explicitly support the following option declaration grammar and warn on anything outside it:
 
-| Flag(s) | Short | Aliases | Arity (`kind`) | Value Hint |
+1. **Long, short+long, and short-only option headers**:
+   - Paired or long-only: `^\s{2,}(?:(-[A-Za-z0-9]),\s*)?(--[A-Za-z0-9][A-Za-z0-9-]*)`
+   - Short-only: `^\s{2,}(-[A-Za-z0-9])(?=\s|$)` (sets `short: "-x"`, `long: null`, `names: ["-x"]`).
+2. **Value hint forms and arities**:
+   - Space- or `=`-separated required value: `<VAL>` or `=<VAL>` -> `requiresValue: true`, `optionalValue: false`.
+   - Space- or `=`-separated optional value: `[<VAL>]`, `[=<VAL>]`, or `=[<VAL>]` -> `requiresValue: false`, `optionalValue: true`.
+   - Variadic suffix: `<VAL>...` or `[<VAL>...]` -> strips trailing `...` from `valueHint`, preserves `requiresValue` / `optionalValue`, and sets `variadic: true`, `repeatable: true`.
+   - No value token -> `requiresValue: false`, `optionalValue: false` (`boolean`).
+3. **Same-line descriptions and aliases**:
+   - When an option header line has trailing description text separated by 2+ spaces (as in `grok-models-help.txt`), `parseFlagLine` captures `inlineDescription` and seeds `currentFlag.description`, `possibleValues`, `default`, and `aliases` immediately so same-line `[aliases: ...]` or `(compat alias...: ...)` are never dropped.
+4. **Parse warnings on unparsed option lines**:
+   - In `parseGrokHelp(text)`, when `section === "options"` and a line begins with 2–6 spaces followed by `-` (`^\s{2,6}-\S`) but `parseFlagLine(line)` returns `null`, `parseWarnings.push(\`unparsed option line: ${trimmed}\`)` is recorded (matching `unparsed command line:` in the `commands` section).
+5. **Subcommand grammar boundary**:
+   - Root `grok --help` describes root options and top-level subcommand names (`commands`). It does not include subcommand-local option tables (e.g., `grok sessions` or `grok wrap`). Accordingly, the CLI tokenizer treats the first known subcommand positional token as the end of top-level option position (see §2).
+
+#### Complete Flag & Arity Table Yielded from `tests/fixtures/grok-help.txt` (41 Flags: 23 Required-Value, 2 Optional-Value, 16 Boolean; 25 Subcommands)
+
+| Canonical Flag | Short | Extracted Aliases (from Help) | Arity (`kind`) | Value Hint |
 |---|---|---|---|---|
-| `--agent` | — | — | `value` (required) | `<NAME>` |
-| `--agents` | — | — | `value` (required) | `<JSON>` |
-| `--allow` | — | `--allowedTools` | `value` (required) | `<RULE>` |
+| `--agent` | — | — | `value` (required) | `NAME` |
+| `--agents` | — | — | `value` (required) | `JSON` |
+| `--allow` | — | `--allowedTools`, `--allowed-tools` | `value` (required, repeatable) | `RULE` |
 | `--always-approve` | — | — | `boolean` (0) | — |
 | `--continue` | `-c` | — | `boolean` (0) | — |
-| `--cwd` | `-C` *(seed)* | — | `value` (required) | `<CWD>` |
+| `--cwd` | — | — | `value` (required) | `CWD` |
 | `--debug` | — | — | `boolean` (0) | — |
-| `--debug-file` | — | — | `value` (required) | `<FILE>` |
-| `--deny` | — | `--disallowedTools` | `value` (required) | `<RULE>` |
+| `--debug-file` | — | — | `value` (required) | `FILE` |
+| `--deny` | — | `--disallowedTools` | `value` (required, repeatable) | `RULE` |
 | `--disable-web-search` | — | — | `boolean` (0) | — |
-| `--disallowed-tools` | — | — | `value` (required) | `<TOOLS>` |
+| `--disallowed-tools` | — | — | `value` (required) | `TOOLS` |
 | `--fork-session` | — | — | `boolean` (0) | — |
 | `--fullscreen` | — | — | `boolean` (0) | — |
 | `--help` | `-h` | — | `boolean` (0) | — |
 | `--include-partial-messages` | — | — | `boolean` (0) | — |
-| `--json-schema` | — | — | `value` (required) | `<SCHEMA>` |
-| `--leader-socket` | — | — | `value` (required) | `<PATH>` |
-| `--model` | `-m` | — | `value` (required) | `<MODEL>` |
-| `--max-turns` | — | — | `value` (required) | `<N>` |
+| `--json-schema` | — | — | `value` (required) | `SCHEMA` |
+| `--leader-socket` | — | — | `value` (required) | `PATH` |
+| `--model` | `-m` | — | `value` (required) | `MODEL` |
+| `--max-turns` | — | — | `value` (required) | `N` |
 | `--minimal` | — | — | `boolean` (0) | — |
 | `--no-alt-screen` | — | — | `boolean` (0) | — |
 | `--no-plan` | — | — | `boolean` (0) | — |
 | `--no-subagents` | — | — | `boolean` (0) | — |
 | `--oauth` | — | — | `boolean` (0) | — |
-| `--output-format` | — | — | `value` (required) | `<OUTPUT_FORMAT>` |
-| `--single` | `-p` | — | `value` (required) | `<PROMPT>` |
-| `--permission-mode` | — | — | `value` (required) | `<MODE>` |
-| `--prompt-file` | — | — | `value` (required) | `<PATH>` |
-| `--prompt-json` | — | — | `value` (required) | `<JSON>` |
-| `--resume` | `-r` | — | `optional-value` (0 or 1 non-flag token, or inline `=`) | `[<SESSION_ID_OR_TITLE>]` |
-| `--reasoning-effort` | — | `--effort` | `value` (required) | `<EFFORT>` |
+| `--output-format` | — | — | `value` (required) | `OUTPUT_FORMAT` |
+| `--single` | `-p` | — | `value` (required) | `PROMPT` |
+| `--permission-mode` | — | — | `value` (required) | `MODE` |
+| `--prompt-file` | — | — | `value` (required) | `PATH` |
+| `--prompt-json` | — | — | `value` (required) | `JSON` |
+| `--resume` | `-r` | — | `optional-value` (0 or 1 non-flag token, or inline `=`) | `SESSION_ID_OR_TITLE` |
+| `--reasoning-effort` | — | `--effort` | `value` (required) | `EFFORT` |
 | `--restore-code` | — | — | `boolean` (0) | — |
-| `--rules` | — | — | `value` (required) | `<RULES>` |
-| `--session-id` | `-s` | — | `value` (required) | `<SESSION_ID>` |
-| `--sandbox` | — | — | `value` (required) | `<PROFILE>` |
-| `--system-prompt-override` | — | `--system-prompt` | `value` (required) | `<PROMPT>` |
-| `--tools` | — | — | `value` (required) | `<TOOLS>` |
+| `--rules` | — | — | `value` (required) | `RULES` |
+| `--session-id` | `-s` | — | `value` (required) | `SESSION_ID` |
+| `--sandbox` | — | — | `value` (required) | `PROFILE` |
+| `--system-prompt-override` | — | `--system-prompt` | `value` (required) | `PROMPT` |
+| `--tools` | — | — | `value` (required) | `TOOLS` |
 | `--version` | `-v` | — | `boolean` (0) | — |
 | `--verbatim` | — | — | `boolean` (0) | — |
-| `--worktree` | `-w` | — | `optional-value` (0 or 1 non-flag token, or inline `=`) | `[<WORKTREE>]` |
-| `--worktree-ref` | — | `--ref` | `value` (required) | `<WORKTREE_REF>` |
-| `--yolo` *(hidden seed)* | — | — | `boolean` (0) | — |
+| `--worktree` | `-w` | — | `optional-value` (0 or 1 non-flag token, or inline `=`) | `WORKTREE` |
+| `--worktree-ref` | — | `--ref` | `value` (required) | `WORKTREE_REF` |
 
-Subcommands yielded from `tests/fixtures/grok-help.txt`:
-`agent`, `clone`, `completions`, `cursor-worker`, `dashboard`, `doctor`, `du` (alias `disk-usage`), `export`, `help`, `inspect`, `leader`, `login`, `logout`, `mcp`, `memory`, `models`, `plugin`, `sessions`, `setup`, `trace`, `update`, `usage`, `version` (alias `v`), `worktree`, `wrap`.
-
-#### Failure Mode When `grok --help` Is Unavailable
-
-When `readGrokHelp(cwd, env)` fails (binary missing, non-zero exit, or empty output):
-1. `buildCliGrammar(helpText)` falls back to `FALLBACK_CLI_GRAMMAR` (one canonical constant inside `lib/cli.mjs`, never duplicated across functions) containing the baseline value flags, optional-value flags (`-r`/`--resume`, `-w`/`--worktree`), and known subcommands.
-2. Router-owned options (`--cwd`/`-C`, `--timeout-ms`, `--allow-mutating`, `--allow-dangerous`) and rejected router-only options (`--json`, `--background`, `--lean`, `--best`, etc.) are still parsed/rejected identically because router option rules are defined once in `lib/cli.mjs`.
-3. If `grok` itself is missing or unexecutable, the subsequent `runProcess` / `runCommand` invocation surfaces the process error cleanly as before.
+Note on `-C` and `--yolo` (`C-F` / `R4-12`):
+- `-C` is a **router-owned alias** for `--cwd` (`references/cli-surface.json` records `short: null` for `--cwd`), so `-C` belongs in Tier 1 (router-owned options), not in the native Grok flag table.
+- `--yolo` is a hidden Grok policy flag not printed by `grok --help`; it is included in the Tier 3 fallback seed as a `boolean` flag.
 
 ---
 
-## 2. Architect Sketch for `plugins/grok-router/scripts/lib/cli.mjs`
+#### Help Timeout, Validation Gate, Merge Precedence, and Fallback Mode (`A-C`, `C-C`)
 
-### Module Boundaries & Line Count Impact (Fixes A1, A4, C3)
+1. **Bounded Synchronous Discovery (`DEFAULT_DISCOVERY_TIMEOUT_MS = 5000`)**:
+   - In `plugins/grok-router/scripts/lib/process.mjs`, `runCommand(command, args, options)` passes `timeout: options.timeoutMs ?? 5000` to `spawnSync`. If `spawnSync` times out (`result.error?.code === "ETIMEDOUT"` or `result.signal`), `runCommand` returns `status: 1` with `error: result.error`.
+   - In `plugins/grok-router/scripts/lib/grok.mjs`, `readGrokHelp(cwd, env, { timeoutMs = 5000 } = {})` gates validity strictly on:
+     ```js
+     const stdout = String(result.stdout ?? "");
+     const ok = !result.error && result.status === 0 && stdout.trim().length > 0 && stdout.length <= 256 * 1024;
+     return { ok, text: ok ? stdout : "", result };
+     ```
+   - `readGrokHelp` **never** falls back to `result.stderr` as help text when `grok --help` fails, and `handleCli` checks `help.ok` before parsing (matching `discoverRoutedSurface`).
+   - Help discovery runs once per CLI invocation from `process.cwd()` bounded by this 5s timeout (`C-C`); cross-process disk caching is out of scope for Phase B.
 
-- **New module**: `plugins/grok-router/scripts/lib/cli.mjs` (~280 lines) owns all `cli` grammar construction, single-pass tokenization, router-option extraction/rejection, subcommand classification, metadata extraction, session/job lineage lookup, and `handleCli`.
+2. **Three-Tier Precedence (`A-C`)**:
+   - **Tier 1 — Router-owned options (evaluated first in option position, independent of `grok --help`)**:
+     - Allowed router options on `cli`: `--cwd` (and router short alias `-C`), `--timeout-ms`, `--allow-mutating`, `--allow-dangerous`.
+     - Rejected router-only options on `cli` (in option position): `--base`, `--scope`, `--tool`, `--lanes`, `--lane`, `--json`, `--background`, `--wait`, `--best`, `--lean`, `--full`, `--search`, `--docs`, `--parallel`, `--panel`, `--all`, `--write`, `--fresh`, `--resume-last`, `--enable-review-gate`, `--disable-review-gate`.
+     - Help output can never override Tier 1 router ownership.
+   - **Tier 2 — Validated live `grok --help` (`help.ok === true`)**:
+     - Parsed via `parseGrokHelp(help.text)`.
+     - For every flag name and alias declared in live help, its live-help arity (`value`, `optional-value`, or `boolean`) **wins** over `FALLBACK_CLI_GRAMMAR`. Adding a name to one arity set removes it from the other two sets so a flag whose arity changed between Grok versions never has stale dual membership.
+   - **Tier 3 — `FALLBACK_CLI_GRAMMAR` seed (lowest precedence)**:
+     - When `help.ok === true`, contributes only names absent from live help (such as hidden `--yolo` and any baseline commands absent from partial help).
+     - When `help.ok === false`, supplies the full baseline Grok 1.0.60 flag and command sets.
+
+3. **Explicit Fallback-Mode Limitation (`A-C`)**:
+   - Consolidating into one tokenizer eliminates all divergence *between* passes inside the router, but when `help.ok === false` (fallback mode), the router only knows the arities in `FALLBACK_CLI_GRAMMAR`.
+   - Therefore, in fallback mode, an unknown future native value flag followed by a router-named value (e.g. `cli --unknown-future-flag --best -p hi`) can still misparse `--best` as an option-position token and reject it (or misclassify `--unknown-future-flag --help` as help-only).
+   - To surface this clearly, `CliGrammar` carries `helpAvailable: boolean`. If `tokenizeCliArgv` rejects a router-only flag while `grammar.helpAvailable === false`, the thrown error appends:
+     ` (grok --help was unavailable; parsed using fallback CLI grammar)`.
+
+---
+
+## 2. Architect Sketch for `plugins/grok-router/scripts/lib/cli.mjs` (`A1`, `A4`, `A-D`, `A-I`, `C-A`)
+
+### Module Boundaries, Shared Helpers, and Line-Count Impact (`A4`, `C-A`)
+
+- **Shared helpers moved to existing library modules (no circular imports from `grok-companion.mjs`)**:
+  - `normalizeArgv(argv)` moves from `grok-companion.mjs:109` to `plugins/grok-router/scripts/lib/args.mjs`.
+  - `resolveCwd(options)` moves from `grok-companion.mjs:138` to `plugins/grok-router/scripts/lib/workspace.mjs`.
+  - `emitJobStarted(job)` is already in `plugins/grok-router/scripts/lib/render.mjs:73`.
+- **New module**: `plugins/grok-router/scripts/lib/cli.mjs` (**~450–520 lines** realistic estimate, `C-A`) owns:
+  - `FALLBACK_CLI_GRAMMAR` and `buildCliGrammar(helpResult)`
+  - `tokenizeCliArgv(argv, grammar)`
+  - `classifyCliTokens(tokens, grammar)` and backward-compatible `classifyCliArgs(args, helpText)`
+  - `extractCliMetadataFromTokens(tokens, cwd, grammar)`
+  - `rewriteResumeArg(passthroughArgs, resumeToken, sessionId)`
+  - `findPriorJobForResume`, `findPriorJobForContinue`, `findPriorJobBySessionId`, `resolveKnownSessionId`, `reconcileCompletedResumeOf`, `effectiveExecutionCwd`, and `classifyCliToolsWrite`
+  - `handleCli(argv, { runProcessImpl = runProcess } = {})`
 - **Entry script (`plugins/grok-router/scripts/grok-companion.mjs`)**:
-  - Deletes `classifyCliArgs`, `CLI_ALLOWED_ROUTER_OPTIONS`, `CLI_REJECTED_ROUTER_OPTIONS`, `CLI_KNOWN_VALUE_FLAGS`, `CLI_KNOWN_OPTIONAL_VALUE_FLAGS`, `parseCliInput`, `parseJsonOrNull`, `findPriorJobForResume`, `findPriorJobForContinue`, `resolveKnownSessionId`, `READ_ONLY_TOOL_NAMES`, `classifyCliToolsWrite`, `extractCliMetadata`, and `handleCli` (~445 lines removed).
-  - `grok-companion.mjs` drops from **1,240 lines** down to **~800 lines** (matching `main`).
-  - `grok-companion.mjs` no longer exports `handleCli` or `resolveKnownSessionId` for test-only access; tests import `lib/cli.mjs` directly.
+  - Removes ~445 lines of inline CLI parsing, metadata, lineage, and handler code (`grok-companion.mjs` drops from **1,238 lines** back to **~795 lines**).
+  - `grok-companion.mjs` no longer exports `handleCli` or `resolveKnownSessionId`; tests import them from `lib/cli.mjs`.
 
-### Types & Data Structures
+### Dropping the `--cwd` Pre-Scan (`A-D`)
+
+- Root `grok --help` is binary-global and does not vary by target working directory.
+- Pre-scanning `argv` for `--cwd` before loading `grok --help` would recreate the bootstrap bug (`--new-value-flag --cwd -p hi`).
+- Therefore, `handleCli` **never pre-scans `argv` for `--cwd`**:
+  1. `handleCli` calls `const help = readGrokHelp(process.cwd(), env)` once.
+  2. `const grammar = buildCliGrammar(help)` builds the unified grammar.
+  3. `tokenizeCliArgv(normalizeArgv(argv), grammar)` tokenizes `argv` in a single pass, extracting `routerOptions.cwd` (when `--cwd` or `-C` appeared in option position) along with `passthroughArgs` and `tokens`.
+  4. `const cwd = resolveCwd(routerOptions)` resolves the target directory for workspace lookup, `--prompt-file` reading, job creation, and spawning `grok`.
+
+### Token Stream, Short-Flag Clusters, Subcommand Boundary, and Index Mapping (`A-I`, `C-A`)
 
 ```js
 /**
  * @typedef {Object} CliGrammar
- * @property {Set<string>} valueFlags         // e.g. "--model", "-m", "--single", "-p", "--rules", ...
+ * @property {Set<string>} valueFlags         // e.g. "--model", "-m", "--single", "-p", "--allow", "--allowedTools", "--allowed-tools", ...
  * @property {Set<string>} optionalValueFlags // e.g. "--resume", "-r", "--worktree", "-w"
  * @property {Set<string>} booleanFlags       // e.g. "--continue", "-c", "--help", "-h", "--yolo", ...
- * @property {Set<string>} commandNames       // e.g. "models", "clone", "help", ...
+ * @property {Map<string, string>} canonicalFlag // maps any short/alias (e.g. "-p", "--effort", "--allowed-tools") to canonical long flag ("--single", "--reasoning-effort", "--allow")
+ * @property {Set<string>} commandNames       // e.g. "models", "clone", "sessions", "help", ...
  * @property {Set<string>} mutatingCommands   // "login", "logout", "plugin", "mcp", "setup", "update", "memory", "worktree", "clone"
+ * @property {boolean} helpAvailable          // true iff built from a valid `readGrokHelp` response
  */
 
 /**
  * @typedef {Object} CliToken
- * @property {"router-option" | "option" | "positional" | "separator"} kind
- * @property {string} raw                     // raw token (or flag name when split)
- * @property {string|null} name               // canonical flag name (e.g. "--resume", "-p", "--cwd") or null for positional
- * @property {string|boolean|null} value      // associated option value if consumed (inline `=` or next argv token), true for boolean flags, null for positionals
- * @property {boolean} inline                 // true if value came from `--flag=value`
- * @property {number} rawIndex                // index in normalized argv where the option/positional appeared
- * @property {number|null} valueRawIndex      // index in normalized argv of the value token (or rawIndex if inline)
- */
-
-/**
- * @typedef {Object} ParsedCliInvocation
- * @property {{ cwd?: string, "timeout-ms"?: string, "allow-mutating"?: boolean, "allow-dangerous"?: boolean }} routerOptions
- * @property {string[]} passthroughArgs       // native args to pass to `grok` (router options stripped)
- * @property {CliToken[]} tokens              // token stream over passthroughArgs
- * @property {{ helpOnly: boolean, mutating: boolean, unclassified: boolean, first: string|null }} classification
- * @property {{
- *   resume: string|boolean|null,
- *   resumeToken: CliToken|null,
- *   hasResumeFlag: boolean,
- *   hasPromptOrResume: boolean,
- *   prompt: string|null,
- *   promptFile: string|null,
- *   model: string|null,
- *   effort: string|null,
- *   tools: string|null,
- *   hasAutoApproveFlag: boolean,
- *   continue: boolean
- * }} metadata
+ * @property {"option" | "positional" | "separator"} kind
+ * @property {string} raw                     // token text in passthroughArgs
+ * @property {string|null} name               // flag token as written (e.g. "-r", "--resume", "-c") or null for positional/separator
+ * @property {string|null} canonical          // canonical long name from grammar (e.g. "--resume", "--continue", "--single")
+ * @property {string|boolean|null} value      // option argument (string) or true (boolean/bare optional-value) or null (positional)
+ * @property {boolean} inline                 // true if value was attached via `=` (`--resume=SID`) or short-attached (`-phello`)
+ * @property {number} passthroughIndex        // index of the flag/positional token in `passthroughArgs`
+ * @property {number|null} passthroughValueIndex // index in `passthroughArgs` holding the value (equals `passthroughIndex` when `inline: true`, or `passthroughIndex + 1` when separate)
  */
 ```
 
-### Function Signatures in `lib/cli.mjs`
+#### Single-Pass Rules in `tokenizeCliArgv(normalizedArgv, grammar)`
 
-```js
-// 1. Build grammar from live `grok --help` text + minimal fallback seed
-export function buildCliGrammar(helpText = "") -> CliGrammar
-
-// 2. Single-pass tokenizer over normalized argv:
-//    - Before `--`, identifies router-owned options (`--cwd`/`-C`, `--timeout-ms`, `--allow-mutating`, `--allow-dangerous`),
-//      rejects disallowed router-only options (`--json`, `--background`, `--lean`, `--best`, etc.) ONLY in option position,
-//      and classifies every native flag (`option` with its consumed `value`, if any) using `CliGrammar`.
-//    - At `--`, emits a `separator` token and classifies all remaining tokens as `positional`.
-export function tokenizeCliArgv(argv, grammar) -> {
-  routerOptions: Record<string, any>,
-  passthroughArgs: string[],
-  tokens: CliToken[]
-}
-
-// 3. Derive subcommand/help/mutating classification from the token stream (NOT `args.includes("--help")`):
-//    - `helpOnly` is true iff a token has `kind === "option"` and `name === "--help" || name === "-h"`,
-//      OR the first positional token (before `--`) is `"help"`.
-export function classifyCliTokens(tokens, grammar) -> {
-  helpOnly: boolean,
-  mutating: boolean,
-  unclassified: boolean,
-  first: string|null
-}
-
-// 4. Derive prompt, resume, continue, model, effort, tools, and write-approval metadata from the SAME token stream:
-export function extractCliMetadataFromTokens(tokens, cwd, grammar) -> Metadata
-
-// 5. Combined convenience entry point when helpText is already available:
-export function analyzeCliArgv(argv, { cwd, helpText }) -> ParsedCliInvocation
-
-// 6. Session & predecessor resolution (used by both `handleCli` and `runRouted` in `grok-companion.mjs`):
-export function findPriorJobForResume(workspaceRoot, target, env = process.env) -> Job|null
-export function findPriorJobForContinue(workspaceRoot, executionCwd, env = process.env) -> Job|null
-export function findPriorJobBySessionId(workspaceRoot, sessionId, { excludeJobId = null } = {}, env = process.env) -> Job|null
-export function resolveKnownSessionId(workspaceRoot, job, env = process.env) -> string|null
-export function classifyCliToolsWrite(tools) -> boolean | "unknown"
-
-// 7. CLI command handler (with optional `runProcessImpl` DI seam on the library function):
-export async function handleCli(argv, { runProcessImpl = runProcess } = {}) -> Promise<void>
-```
-
-### How Single-Pass Tokenization Solves `readGrokHelp` Ordering (`--cwd`)
-
-In `handleCli(argv)`:
-1. A lightweight pre-scan (or phase 1 of `tokenizeCliArgv` using the grammar) extracts `--cwd` / `-C` only when it appears in option position before `--`, or we first read `--cwd` so we know which directory to run `readGrokHelp(cwd, env)` in.
-   - Specifically: `--cwd` is a known value flag in both live help and the fallback seed. Reading `cwd` first, then calling `readGrokHelp(cwd, env)`, and then running `tokenizeCliArgv(argv, buildCliGrammar(help.text))` means **live help is always loaded before router-flag rejection and token classification run**.
-   - Consequently, if live `grok --help` declares a new flag `--new-native-flag <VAL>`, `tokenizeCliArgv` knows `--new-native-flag` takes a value, so `cli --new-native-flag --best -p hi` consumes `--best` as the value of `--new-native-flag` and **never** falsely rejects it!
+1. **Option-position state (`inOptionPosition`)**:
+   - Starts `true`.
+   - Becomes `false` immediately when:
+     a. `--` is encountered (emits `{ kind: "separator", raw: "--", passthroughIndex }`; all subsequent tokens are pushed to `passthroughArgs` and emitted as `{ kind: "positional" }`), OR
+     b. A positional token is encountered that is a known subcommand (`grammar.commandNames.has(token)`), e.g., `models`, `sessions`, `clone`, `wrap`, `help` (`A-I` / `R4-8`).
+   - Once `inOptionPosition === false` after a subcommand:
+     - Router-only flag rejection (`--json`, `--best`, etc.) and router-option stripping (`--cwd`, `--timeout-ms`) **do not run** on subcommand arguments (so `cli sessions list --json` or `cli wrap -- cmd --best` are not falsely rejected).
+     - Tokens after a subcommand before `--` are still checked only for `-h` / `--help` so `cli clone --help` or `cli models -h` is classified as `helpOnly: true`.
+2. **Router-owned options (while `inOptionPosition === true`)**:
+   - `--cwd` / `-C` and `--timeout-ms` (separate value or `--flag=value`) are consumed into `routerOptions` and **not** pushed to `passthroughArgs`.
+   - `--allow-mutating` and `--allow-dangerous` (boolean or `=true`/`=false`) are consumed into `routerOptions` and **not** pushed to `passthroughArgs`.
+   - Any flag in `CLI_REJECTED_ROUTER_OPTIONS` (`--json`, `--background`, `--lean`, `--best`, etc.) throws `--<key> is a router option and is not supported on cli...`.
+3. **Combined short flags and attached values (`A-I` / `R4-7`)**:
+   - For a short token `-xyz` (`token.startsWith("-") && !token.startsWith("--") && token.length > 2`):
+     - **Short `=` form (`-m=grok-4.6`, `-r=SID`)**: split at first `=`; push `token` to `passthroughArgs` at `idx` and emit `{ kind: "option", name: "-r", canonical: "--resume", value: "SID", inline: true, passthroughIndex: idx, passthroughValueIndex: idx }`.
+     - **Combinable short cluster (`-cp hi`, `-cr SID`)**: if every char `c` in `token.slice(1)` is a known short flag `-${c}` in `grammar`, and every char except possibly the last is in `grammar.booleanFlags`:
+       - Expand the cluster into individual flags in `passthroughArgs` (e.g., `"-c"`, `"-p"`, `"hi"`). That way `cli -cp "hi"` is tokenized as `-c` (`continue: true`) + `-p "hi"` (`prompt: "hi"`), runs **tracked**, and if `-cr <jobId>` is used, `-r` has its own clean `passthroughValueIndex` for `<jobId>` -> `<sessionId>` translation!
+     - **Attached short value (`-phello`, `-mgrok-4.6`)**: if `token.slice(0, 2)` is in `grammar.valueFlags` or `grammar.optionalValueFlags`:
+       - Push `token` to `passthroughArgs` at `idx` and emit `{ kind: "option", name: token.slice(0, 2), canonical, value: token.slice(2), inline: true, passthroughIndex: idx, passthroughValueIndex: idx }`.
+     - **Otherwise**: push `token` to `passthroughArgs` and emit as a boolean option token.
+4. **Lossless `-r <jobId>` Translation Helper (`C-A` / `Codex R4-8`)**:
+   - `rewriteResumeArg(passthroughArgs, resumeToken, sessionId)`:
+     - Clones `passthroughArgs`.
+     - If `!resumeToken` or `resumeToken.passthroughValueIndex == null`, returns the clone unchanged.
+     - If `resumeToken.inline` (e.g., `--resume=<jobId>` or `-r=<jobId>` or `-r<jobId>`), replaces `clone[resumeToken.passthroughValueIndex]` with `${resumeToken.name}=${sessionId}` (or `${resumeToken.name}${sessionId}` when raw did not contain `=`).
+     - Otherwise, replaces `clone[resumeToken.passthroughValueIndex]` with `sessionId`.
 
 ### Call Sites in `grok-companion.mjs` Replaced by `lib/cli.mjs`
 
 1. `HANDLERS.cli`: calls `handleCli` imported from `./lib/cli.mjs`.
-2. `runRouted`: calls `findPriorJobForResume`, `findPriorJobForContinue`, `findPriorJobBySessionId`, and `resolveKnownSessionId` imported from `./lib/cli.mjs`.
-3. Exports of `grok-companion.mjs`: `classifyCliArgs` (thin wrapper over `buildCliGrammar` + `tokenizeCliArgv` + `classifyCliTokens` for backward export compatibility), while `handleCli` and `resolveKnownSessionId` live in `lib/cli.mjs`.
+2. `runRouted` and `runStoredJob`: call `findPriorJobForResume`, `findPriorJobForContinue`, `resolveKnownSessionId`, and `reconcileCompletedResumeOf` imported from `./lib/cli.mjs`.
+3. `classifyCliArgs`: re-exported from `./lib/cli.mjs` for backward compatibility.
 
 ---
 
-## 3. A2 Options and Recommendation (`--continue` / Session Ancestry)
+## 3. Hybrid A2 Specification: Execution Directory, Pre-Run Filter, and Post-Run Reconciliation (`A-A`, `A-B`, `A-E`, `A-F`, `C-D`, `C-E`)
 
-### Option (a): Link turns by the session ID Grok actually reports after the run
+### 1. Execution Directory Policy and Legacy Records (`A-A`)
 
-- **Mechanism**:
-  - Do not guess `resumeOf` for `--continue` / `-c` (or bare `-r`) before `grok` runs.
-  - After `grok` finishes and reports `sessionId` (extracted from JSON stdout), look up the most recent prior completed job in `workspaceRoot` (excluding the current job) whose `grokSessionId === sessionId` (or `request.controls.resume === sessionId`).
-  - Set `resumeOf: matchedPriorJob?.id ?? null` in the terminal job transition.
-- **Pros**:
-  - Ground truth when `grok` outputs JSON (`--output-format json`): never links to a failed job, a running sibling, a lane leaf from another session, or the wrong directory's session.
-  - Automatically reconciles even if the user ran native `grok` turns in between or if multiple sessions exist.
-- **Cons / Edge Cases**:
-  - In `cli` plain mode (`grok -c -p "hi"` without `--output-format json`), `grok` prints plain text and does not emit `sessionId` on stdout (`parsedSessionId` is `null`, `grokSessionId` becomes `"unknown"`). Pure post-hoc matching alone cannot link a plain-output `cli -c` turn unless combined with a pre-run fallback or restricted to JSON runs.
-  - While the job is in `queued`/`running` status (before completion), `resumeOf` is `null` until completion.
+- **Fixed Execution Directory Policy**:
+  - **Managed modes (`analyze`, `exec`, `review`, `adversarial-review`, `rescue`)**: always execute `grok` in `workspaceRoot` (`runStoredJob` -> `runGrokPrintJob(workspaceRoot, ...)`). Every new managed job record stores:
+    - `cwd`: `resolveCwd(options)` (the caller's requested directory)
+    - `workspaceRoot`: `resolveWorkspaceRoot(cwd)`
+    - `executionCwd`: `workspaceRoot` (the actual directory `grok` runs in and uses for session lookup)
+  - **`cli` mode**: executes `grok` in `cwd` (`resolveCwd(routerOptions)`). Every new tracked `cli` job record stores:
+    - `cwd`: `cwd`
+    - `workspaceRoot`: `resolveWorkspaceRoot(cwd)`
+    - `executionCwd`: `cwd`
+  - **Lane leaf jobs (`grok-lane`)**: store `cwd` and `executionCwd: workspaceRoot` (and are excluded from `--continue` lookup by `jobClass === "grok"`).
+- **Legacy Job Records Without `executionCwd`**:
+  - Historical managed job records stored `job.cwd` (which could be a subdirectory) even though `grok` executed in `job.workspaceRoot`. Falling back to `job.cwd` on a legacy managed job would preserve the mismatch bug (`Codex R4-4`).
+  - Therefore, `effectiveExecutionCwd(job)` is defined as:
+    ```js
+    export function effectiveExecutionCwd(job) {
+      if (job?.executionCwd) {
+        return path.resolve(job.executionCwd);
+      }
+      if (job?.mode === "cli") {
+        return path.resolve(job.cwd ?? job.workspaceRoot ?? process.cwd());
+      }
+      return path.resolve(job?.workspaceRoot ?? job?.cwd ?? process.cwd());
+    }
+    ```
 
-### Option (b): Best-effort pre-run `--continue` linking, restricted to completed jobs with a known session in the effective execution `cwd`
+### 2. Pre-Run Lookup Rules (`A-A`, `A-E`, `A-F`, `C2`, `C4`)
 
-- **Mechanism**:
-  - Filter candidate predecessors to jobs where:
-    1. `job.status === "completed" || job.status === "completed-with-warnings"` (never `failed`, `cancelled`, `queued`, `running`, `interrupted`).
-    2. `job.jobClass === "grok"` (excludes both `grok-panel` parents and `grok-lane` leaves).
-    3. `Boolean(job.grokSessionId && job.grokSessionId !== "unknown")` (must actually have a known Grok session).
-    4. `path.resolve(job.executionCwd ?? job.cwd ?? job.workspaceRoot) === path.resolve(executionCwd)`, where `executionCwd` is the directory in which the router actually spawns `grok` (`workspaceRoot` for managed modes unless managed modes pass `cwd`, and `cwd` for `cli`).
-  - Sort eligible jobs by `completedAt ?? updatedAt` descending.
-  - Treat bare `-r` / `--resume` (`resume === true`) identically to `--continue` / `-c` (fixes C4 / R3-8).
-  - Document `--continue` linkage in `CHANGELOG.md` as **best-effort** rather than an unconditional turn-by-turn guarantee.
-- **Pros**:
-  - Works even for plain-text `cli -c -p "hi"` runs that do not emit JSON `sessionId`.
-  - `resumeOf` is immediately visible while the job is running.
-  - Eliminates all reproduced failure modes in A2 (never links to a failed job, running job, lane leaf, or mismatched execution directory).
-- **Cons**:
-  - If the user created an untracked session directly in raw `grok` TUI outside the router after the last router job, `grok -c` will continue that external session while the router's best-effort heuristic links to the last router job in that directory (unless post-hoc reconciliation overrides it when `sessionId` is reported).
+Let `SUCCESSFUL_JOB_STATUSES = new Set(["completed", "completed-with-warnings"])`.
 
-### Recommendation: **Hybrid (Option (a) post-run reconciliation + Option (b) strict best-effort pre-run filter, labeled best-effort in CHANGELOG)**
+- **`linkage` field stored on every new job record (`A-B`)**:
+  - `"fork"` if `--fork-session` or `--session-id` / `-s` was passed alongside `--continue`/`-c` or `--resume`/`-r`.
+  - `"continue"` if `--continue` / `-c` or bare `--resume` / `-r` (`resume === true`) was passed (and not `"fork"`).
+  - `"resume"` if a named `--resume <target>` / `-r <target>` was passed (and not `"fork"`).
+  - `null` otherwise.
 
-Combining both gives the strongest behavior with zero downside:
-1. **Before `grok` runs (Option b strict filter)**:
-   - For `--continue` / `-c` or bare `--resume` / `-r` (`resume === true`), `findPriorJobForContinue(workspaceRoot, executionCwd, env)` only considers jobs with:
-     - `job.jobClass === "grok"` (not `grok-panel` or `grok-lane`),
-     - `job.status === "completed" || job.status === "completed-with-warnings"`,
-     - `job.grokSessionId && job.grokSessionId !== "unknown"`,
-     - matching `executionCwd` (and for managed modes, `runGrokPrintJob` either runs in `cwd` or passes `--cwd` / matches `workspaceRoot` consistently — specifically, in `runRouted`, `request.controls.cwd` or the process `cwd` is unified so `executionCwd` is always the exact directory `grok` uses for session lookup).
-   - For named `--resume <target>` / `-r <target>` (fixes C2 / Codex G2):
-     - Separate **argv translation** (`resumedByJobId`: only when `target === priorJob.id`) from **predecessor linkage** (`findPriorJobForResume`: matches `job.id === ref`, or the most recent completed job where `job.grokSessionId === ref || job.request?.controls?.resume === ref`). That way, if `J1` reported `S` and `J2` resumed `S` with plain output (`grokSessionId: "unknown"`, `request.controls.resume: "S"`), a third turn `-r S` links `resumeOf` to `J2` (preserving the turn-by-turn chain) while `resumedByJobId` is `false` so `-r S` is still never rewritten in `argv`!
-2. **After `grok` finishes (Option a post-run reconciliation)**:
-   - When `grok` completes and reports a concrete `sessionId` (`sessionId && sessionId !== "unknown"`):
-     - For `--continue` / `-c` or bare `-r`, if `priorJob` had a different `grokSessionId !== sessionId`, reconcile `resumeOf` to `findPriorJobBySessionId(workspaceRoot, sessionId, { excludeJobId: job.id })?.id ?? null`.
-     - If `grok` fails (`jobStatus !== "completed"`), `grokSessionId` remains `null`.
-3. **Documentation**:
-   - In `CHANGELOG.md`, describe `--continue` / `-c` linkage as best-effort session/directory matching rather than an unconditional guarantee.
+- **Implicit continue (`--continue` / `-c` or bare `-r` / `--resume`, `findPriorJobForContinue(workspaceRoot, executionCwd, env)`)**:
+  - Filters `listJobs(workspaceRoot, env)` to candidates where:
+    1. `job.jobClass === "grok"` (excludes `grok-panel` and `grok-lane`),
+    2. `SUCCESSFUL_JOB_STATUSES.has(job.status)`,
+    3. `Boolean(job.grokSessionId && job.grokSessionId !== "unknown")` (plain-output turns with `"unknown"` are never eligible predecessors — `A-F`),
+    4. `effectiveExecutionCwd(job) === path.resolve(executionCwd)`.
+  - Sorts eligible candidates by `Date.parse(job.completedAt ?? job.updatedAt)` descending, then `Date.parse(job.createdAt)` descending, then `job.id` descending.
+  - Returns the top candidate or `null`.
+
+- **Named resume (`--resume <target>` / `-r <target>`, `findPriorJobForResume(workspaceRoot, target, env)`) (`A-E`, `C2`)**:
+  - Trims `ref = String(target).trim()`.
+  - First checks for an exact router job ID match: `jobs.find((job) => job.id === ref)`.
+    - **Only when `priorJob && ref === priorJob.id` (`resumedByJobId === true`)** does the router resolve `priorSessionId = resolveKnownSessionId(workspaceRoot, priorJob, env)`, throw `Job ${priorJob.id} has no known Grok session.` if `!priorSessionId` (`N2b`), and rewrite `<jobId>` to `priorSessionId` in `grok`'s argv (`N1`).
+  - Otherwise (`resumedByJobId === false`, so `ref` is a raw session UUID or a session title):
+    - `ref` is passed through to `grok` **unchanged** (`N1`).
+    - For pre-run `resumeOf` lineage (`C2` & `A-E`), searches completed `jobClass === "grok"` jobs (`SUCCESSFUL_JOB_STATUSES.has(job.status)`) sorted newest-first by `completedAt ?? updatedAt` where:
+      - `job.grokSessionId === ref` (reported session matches `ref`), **OR**
+      - `(!job.grokSessionId || job.grokSessionId === "unknown") && job.request?.controls?.resume === ref` (requested session matches `ref` **only when** the job's reported session is absent or `"unknown"` — never when the job reported a contradictory session `B !== ref`, `A-E`).
+    - If `ref` is a session title (no UUID match pre-run), `findPriorJobForResume` returns `null` pre-run, and post-run reconciliation (`A-B`) links `resumeOf` once `grok` resolves the title and reports the session UUID in JSON output (`A-E`).
+
+### 3. Post-Run Reconciliation Seam and Ordering Rules (`A-B`, `A-E`, `C-D`, `C-E`)
+
+- **Seam in `plugins/grok-router/scripts/lib/jobs.mjs`**:
+  - In `runTrackedJob(job, runner, options = {})` (`lib/jobs.mjs:119-141`), the terminal `transitionJob` callback computes:
+    ```js
+    const status = execution.jobStatus ?? (execution.exitStatus === 0 ? "completed" : "failed");
+    const succeeded = status === "completed" || status === "completed-with-warnings";
+    const grokSessionId = succeeded ? (execution.grokSessionId ?? null) : null;
+    const resumeOf = typeof options.reconcileResumeOf === "function"
+      ? options.reconcileResumeOf(current, { ...execution, jobStatus: status, grokSessionId })
+      : (execution.resumeOf !== undefined ? execution.resumeOf : (current.resumeOf ?? null));
+    ```
+    and writes `resumeOf` and `grokSessionId` onto the terminal job record.
+- **Signature & Logic of `reconcileCompletedResumeOf(workspaceRoot, currentJob, execution, env = process.env)` in `lib/cli.mjs`**:
+  1. **Failure guard**: If `!SUCCESSFUL_JOB_STATUSES.has(execution.jobStatus)`, return `currentJob.resumeOf ?? null` (and `grokSessionId` is `null`).
+  2. **Non-linked or forked runs (`A-E`)**: If `!currentJob.linkage || currentJob.linkage === "fork"`, return `currentJob.resumeOf ?? null` unchanged (preserving the pre-run source link when `--fork-session` or `--session-id` / `-s` created a new session ID).
+  3. **Authoritative session evidence (`C-E`)**: Extract `reportedSessionId = typeof execution.payload?.parsedOutput?.sessionId === "string" ? execution.payload.parsedOutput.sessionId.trim() : null`.
+     - If `!reportedSessionId` (e.g., plain-text output where no JSON `sessionId` was emitted), keep the pre-run best-effort `currentJob.resumeOf ?? null`.
+  4. **Candidate search (runs even when `currentJob.resumeOf` was `null` pre-run)**:
+     - Let `upperBoundMs = Date.parse(currentJob.startedAt ?? currentJob.createdAt ?? "")`.
+     - Filter `listJobs(workspaceRoot, env)` to candidates `cand` where:
+       a. `cand.id !== currentJob.id`
+       b. `cand.jobClass === "grok"`
+       c. `SUCCESSFUL_JOB_STATUSES.has(cand.status)`
+       d. **Earlier-than boundary**: `const candDoneMs = Date.parse(cand.completedAt ?? cand.updatedAt ?? "");` require `Number.isFinite(candDoneMs) && Number.isFinite(upperBoundMs) && candDoneMs <= upperBoundMs` (only jobs that finished on or before `currentJob` started can be its parent).
+       e. **Non-contradictory session match (`A-E`)**:
+          `cand.grokSessionId === reportedSessionId || ((!cand.grokSessionId || cand.grokSessionId === "unknown") && cand.request?.controls?.resume === reportedSessionId)`
+       f. **Cycle guard**: walking `cand -> cand.resumeOf -> ...` via `readJobFile(workspaceRoot, id, env)` with a `visited = new Set([currentJob.id])` set must not encounter `currentJob.id` or any repeated job ID.
+     - Sort matching candidates by `Date.parse(cand.completedAt ?? cand.updatedAt)` descending, then `Date.parse(cand.createdAt)` descending, then `cand.id` descending.
+  5. **Reconcile decision**:
+     - If `currentJob.linkage === "continue"`:
+       - If the pre-run `currentJob.resumeOf` already points to a candidate that is in the matching set and is the top candidate, keep `currentJob.resumeOf`.
+       - Otherwise, return `matchingCandidates[0]?.id ?? null` (which updates `resumeOf` when `grok` continued a different router session than guessed, and **clears `resumeOf` to `null`** when `grok` continued an external session unknown to the router).
+     - If `currentJob.linkage === "resume"`:
+       - If `currentJob.resumeOf` was `null` pre-run (e.g., title-based `-r <title>`), return `matchingCandidates[0]?.id ?? null`.
+       - Otherwise keep `currentJob.resumeOf` (unless it would form a cycle).
+
+### 4. Plain-Output Chains and Concurrency Notes (`A-F`, `C-D`)
+
+- **Chains of plain-output `-c` turns (`A-F`)**:
+  - Plain-output `cli` runs (without `--output-format json`) record `grokSessionId: "unknown"`. Because `"unknown"` is excluded by the known-session filter and emits no JSON `sessionId` for post-run reconciliation, a plain-output turn cannot serve as the predecessor for a subsequent `-c` turn. A chain of two plain-output `cli -c -p` turns will link the first plain turn to the prior JSON job (if any), while the second plain turn will skip the first plain turn (or record `resumeOf: null` if no prior JSON job exists).
+  - This will be stated explicitly in `CHANGELOG.md` under `0.3.8`, noting that `--output-format json` is required when chaining multiple `cli -c` turns.
+- **Concurrent `-c` runs (`C-D`)**:
+  - If two `-c` jobs start concurrently before either finishes, the `candDoneMs <= upperBoundMs` boundary prevents them from linking to each other, the cycle guard prevents reciprocal cycles, and both link to the same prior completed session job.
 
 ---
 
-## 4. Phase B Test Plan (Strict Test-First Verification)
+## 4. Phase B Test Plan (With Exact Failure Reasons at `dbe13e0`)
 
-Every behavioral change in Phase B will be committed as a `test:` commit first, verified to **fail for the exact behavioral assertion** (never for a missing export or `typeof` check), and then made green by the following `impl:` commit without editing the test.
+All behavioral tests below run through `runCompanion` (in `tests/companion.test.mjs`) or `parseGrokHelp` (in `tests/help.test.mjs`) and fail on their behavioral assertions at `dbe13e0` before any implementation code is written.
 
-Wait — how do we avoid missing-export failures when introducing `lib/cli.mjs`?
-- Either:
-  1. All new tests in `tests/companion.test.mjs` invoke the companion CLI (`runCompanion(...)`) or existing exported functions (`buildRouterRequest`, `parseRoutedInput`) so they test behavior end-to-end and fail on the behavioral assertion against current head `dbe13e0`, **or**
-  2. If a unit test imports `lib/cli.mjs`, `lib/cli.mjs` is extracted first as a pure behavior-preserving refactor commit (or the test exercises `runCompanion` / `classifyCliArgs` which already exists).
-- By writing the Round 4 tests against `runCompanion` and existing exports (`classifyCliArgs`), **every single test runs and fails on its behavioral assertion at head `dbe13e0` before `lib/cli.mjs` is even written!**
-
-### Planned New Tests and Their Exact Failing Reasons Before the Fix
-
-| # | Target Finding | Test Description | How It Is Invoked | Exact Failure Reason Before Fix (at `dbe13e0`) |
-|---|---|---|---|---|
-| **T-A1a** | **A1 / R3-10** | `cli -p "--help" --output-format json` and `cli -p "hello" -- --help` are tracked as router jobs (emit `Job ID:` on stderr and write a job record) because `--help` is a prompt value or post-`--` positional, not a help option. | `runCompanion(["cli", "-p", "--help", "--output-format", "json"], tempDir)` | Fails `assert.match(res.stderr, /Job ID:\s+\S+/)`: `classifyCliArgs` uses `args.includes("--help")`, sets `helpOnly: true`, and skips job tracking (`stderr` is `""`). |
-| **T-A1b** | **A1 / Codex G1 / Claude R3-1** | When live `grok --help` advertises a new value flag (e.g. `--custom-filter <EXPR>`), `cli --custom-filter --best -p "hello" --output-format json` treats `--best` as the value of `--custom-filter` and does not reject `--best` as a router option. | `runCompanion(["cli", "--custom-filter", "--best", "-p", "hello", "--output-format", "json"], tempDir, { GROK_FAKE_EXTRA_HELP_FLAGS: "      --custom-filter <EXPR>\n          Filter expression\n" })` | Fails `assert.equal(res.status, 0)`: `parseCliInput` uses the static `CLI_KNOWN_VALUE_FLAGS` set (which lacks `--custom-filter`), sees `--best` as a standalone option, and exits `1` with `--best is a router option and is not supported on cli`. |
-| **T-A2a** | **A2 / Codex G3 / Claude R3-5** | `--continue` / `-c` skips failed jobs (with `grokSessionId: null`) and `grok-lane` leaves, linking `resumeOf` to the most recent completed job with a known session (or `null` if only a failed job exists). Also bare `cli -r -p "next"` links `resumeOf` the same way (C4 / R3-8). | `runCompanion`: Turn 1 `analyze` succeeds (`sid`); Turn 2 `cli -p "fail"` fails (`GROK_FAKE_AUTH: "1"`); Turn 3 `cli -c -p "after fail" --output-format json`. Assert `turn3Job.resumeOf === turn1Id`. | Fails `assert.equal(turn3Job.resumeOf, turn1Id)`: `findPriorJobForContinue` picks the failed Turn 2 (`cli-...`) instead of Turn 1 (`analyze-...`). |
-| **T-A2b** | **A2 / Codex G4 / Claude R3-4** | Inside a single initialized Git repository (`git init`), running Turn 1 in repo root and Turn 2 with `--cwd sub --continue` (both `cli` and `analyze`) uses a consistent execution directory and does not link a subdirectory `--cwd` job to a root-directory session while executing in root (and both jobs share the same `resolveStateDir`). | `initGitRepo(tempDir)`, `fs.mkdirSync(subDir)`: verify `resolveStateDir(tempDir) === resolveStateDir(subDir)`, run Turn 1 in `tempDir`, run `analyze --cwd sub --continue` and `cli --cwd sub --continue`. | Fails in a real Git repo because: (1) managed `runRouted` spawns `grok` in `workspaceRoot` without passing `--cwd sub` while `findPriorJobForContinue` filters by `sub`, and (2) when Turn 1 is a failed job in `sub`, `--continue` links to it. |
-| **T-C2** | **C2 / Codex G2** | When Turn 1 (`J1`) reports session `S`, Turn 2 (`J2`) runs `cli -r S -p "plain"` (plain output -> `grokSessionId: "unknown"`, `request.controls.resume: "S"`), and Turn 3 (`J3`) runs `cli -r S -p "third" --output-format json`, `J3.resumeOf` links to `J2.id` (not skipping `J2` back to `J1`), while N1 still holds (`cli -r A` after `J2` forced session `B` still sends `-r A`). | `runCompanion` 3-turn sequence in `tempDir`. | Fails `assert.equal(turn3Job.resumeOf, turn2Id)`: `findPriorJobForResume` at `dbe13e0` only checks `job.grokSessionId === ref`, so it returns `J1` instead of `J2`. |
-
-### Confirmation Against Export-Only Failures
-
-- None of `T-A1a`, `T-A1b`, `T-A2a`, `T-A2b`, or `T-C2` imports any unexported symbol or asserts `typeof fn === "function"`.
-- Every test executes through `runCompanion` (black-box child process) and fails on an actual behavioral assertion (`status`, `stderr`, `resumeOf`, or `argv`) against `dbe13e0`.
+| # | Target Finding | Test Description & Setup | Exact Failure Reason at `dbe13e0` (Before Fix) |
+|---|---|---|---|
+| **T-A1a** | **A1 / R3-10 / A-I** | `cli -p "--help" --output-format json`, `cli -p "hello" -- --help`, and combined short cluster `cli -cp "hello" --output-format json` are tracked as router jobs (emit `Job ID:` on stderr and persist a job record with `request.prompt`). | Fails `assert.match(res.stderr, /Job ID:\s+\S+/)`: at `dbe13e0`, `classifyCliArgs` uses `args.includes("--help")` and sets `helpOnly: true` for the first two legs (`stderr` is `""`), and `-cp` is unrecognized as `-c` + `-p` so `hasPromptOrResume` is `false` for the third leg. |
+| **T-A1b** | **A1 / A-G / A-I** | Using `GROK_FAKE_FIXTURES` pointed at a temp fixture dir written with `helpText({ flags: "      --custom-filter <EXPR>\n          Filter expression\n" })`: (1) assert `cli --help` output contains `--custom-filter <EXPR>`; (2) assert `cli --custom-filter --best -p "hello" --output-format json` exits `0` and is tracked; (3) assert `cli sessions --json` (router-named flag after a known subcommand) is not rejected as a router option. | Fails `assert.equal(res.status, 0)` on legs (2) and (3): at `dbe13e0`, `parseCliInput` runs before `readGrokHelp`, uses the static `CLI_KNOWN_VALUE_FLAGS` set (which lacks `--custom-filter`), and continues scanning past subcommand positionals, exiting `1` with `--best is a router option...` and `--json is a router option...`. |
+| **T-A1c** | **A-H / A-I** | In `tests/help.test.mjs`: refresh `tests/fixtures/grok-help.txt` line 17 to `(compat aliases: --allowedTools, --allowed-tools)` and test `parseGrokHelp` on plural/singular `(compat alias(es): ...)`, `--flag=<VAL>`, `<FILE>...` variadics, short-only `-x`, same-line `[aliases: ...]`, and `parseWarnings` on malformed option lines. | Fails `assert.deepEqual(allow.aliases, ["--allowedTools", "--allowed-tools"])`: at `dbe13e0`, `parseAliases` only matches `[aliases: ...]`, returning `[]` for `--allow`, `--deny`, and `--system-prompt-override`, misclassifying `--flag=<VAL>` as boolean, and returning `parseWarnings: []` on malformed option lines. |
+| **T-A2a** | **A2 / C-B / C4 / A-B** | In `tests/companion.test.mjs`: Turn 1 `analyze` succeeds with session `sid1`; Turn 2 `analyze --lanes a,b` creates completed `grok-lane` leaf jobs; Turn 3 `cli -p "fail"` fails (`GROK_FAKE_AUTH: "1"`); Turn 4 `cli -c -p "after fail and lanes" --output-format json` (`GROK_FAKE_SESSION: sid1`) asserts `turn4Job.resumeOf === turn1Id`; Turn 5 bare `cli -r -p "bare resume" --output-format json` (`GROK_FAKE_SESSION: sid1`) asserts `turn5Job.resumeOf === turn4Id`; Turn 6 `cli -c -p "reconcile to sid1" --output-format json` after a Turn 5b with `sid2` but reporting `GROK_FAKE_FORCE_SESSION: sid1` reconciles `resumeOf` to `turn5Id`. | Fails `assert.equal(turn4Job.resumeOf, turn1Id)`: at `dbe13e0`, `findPriorJobForContinue` picks the failed Turn 3 job (`cli-...`) because it neither filters out `failed` jobs nor excludes `grok-lane` leaves, and bare `cli -r` records `resumeOf: null`. |
+| **T-A2b** | **A-A / Codex R4-4 / Claude R4-1** | Initialize a real Git repo (`initGitRepo(tempDir)`) and create subdirectory `subDir = path.join(tempDir, "sub")`. Assert `resolveStateDir(tempDir) === resolveStateDir(subDir)`. Turn 1: `analyze --json "Root turn"` in `tempDir` (`GROK_FAKE_SESSION: sid`). Turn 2: `analyze --cwd subDir --continue --json "Managed sub turn"` (`GROK_FAKE_SESSION: sid`). Assert `turn2Job.resumeOf === turn1Job.id` and `turn2Job.executionCwd === fs.realpathSync.native(tempDir)` (or `path.resolve(tempDir)`). Also run labeled guard `cli --cwd subDir --continue -p "Plain cli sub turn"` and assert `resumeOf === null`. | Fails `assert.equal(turn2Job.resumeOf, turn1Job.id)`: at `dbe13e0`, `runRouted` calls `findPriorJobForContinue(workspaceRoot, subDir)` which compares `turn1Job.cwd` (`tempDir`) against `subDir`, returning `null` (`null !== turn1Job.id`), even though managed mode executes `grok` in `workspaceRoot` (`tempDir`). |
+| **T-C2** | **C2 / A-E** | Turn 1 (`J1`) reports session `S`; Turn 2 (`J2`) runs `cli -r S -p "plain"` (plain output -> `grokSessionId: "unknown"`, `request.controls.resume: "S"`); Turn 3 (`J3`) runs `cli -r S -p "third" --output-format json` (`GROK_FAKE_SESSION: S`) -> assert `J3.resumeOf === J2.id`. Also verify `--fork-session`: Turn 4 runs `cli -c --fork-session -p "forked" --output-format json` (`GROK_FAKE_FORCE_SESSION: forkedSid`) -> assert `J4.resumeOf === J3.id` (not erased by post-run reconcile). Also verify contradictory session guard (`A-E`): if `J_reassign` requested `-r S` but reported `otherSid`, a subsequent `-r S` links to `J3` (not `J_reassign`). | Fails `assert.equal(turn3Job.resumeOf, turn2Id)`: at `dbe13e0`, `findPriorJobForResume` only checks `job.grokSessionId === ref`, skipping `J2` and returning `J1`. |
 
 ---
 
-## 5. Additional Phase B Items (Planned, Not Executed in Phase A)
+## 5. Additional Phase B Items (Queued for Phase B Implementation)
 
-1. **A3 (Relabel `5b210f1` / `f19aaf0` in PR body)**:
-   - Update the PR #6 description so `5b210f1 -> f19aaf0` (F2 and N4) are explicitly labeled as **strengthened regression coverage + test-export refactor**, not as behavioral test-first pairs, while citing the earlier historical commits (`b3b5695` for F2 timeout, `6dc1833` for N4 chain walk) where the behaviors were introduced.
-   - Replace the in-process `main()` + `globalThis.setTimeout` monkey-patching in the F2 test with a clean unit test against `lib/cli.mjs`'s `handleCli` DI seam (`Claude R3-11` / `Codex G6`).
+1. **A3 (Relabel `5b210f1` / `f19aaf0` in PR body and clean up F2 test)**:
+   - In the PR #6 description, relabel `5b210f1 -> f19aaf0` (F2 and N4) as **strengthened regression coverage + test-export refactor**, citing `b3b5695` (F2 timeout) and `6dc1833` (N4 chain walk) for the behavioral changes.
+   - Simplify the F2 test in `tests/companion.test.mjs` to call `handleCli` from `lib/cli.mjs` via its `runProcessImpl` seam without mutating `globalThis.setTimeout`, `process.stdout.write`, or `process.env` (`Claude R3-11` / `Codex G6`).
 2. **A5 (Remove explanatory comments)**:
-   - Remove the explanatory comments added in `tests/companion.test.mjs` (lines 316, 352, 369, 715, 719, 724, 786, 799, 811) and `plugins/grok-router/scripts/lib/router.mjs` (lines 171-173), folding any needed context into test names or assertion messages.
-3. **C1 (`status` / `result` / `cancel` `stopAtPositional` change in `3de1619`)**:
-   - Revert `stopAtPositional: false` back to `stopAtPositional: true` on `handleStatus`, `handleResult`, and `handleCancel` in `grok-companion.mjs`, and pass `--cwd <dir>` before the positional `<jobId>` in the test (`["result", "--json", "--cwd", otherCwd, otherCwdId]`), keeping the PR scope tight.
+   - Remove the explanatory comments in `tests/companion.test.mjs` (lines 316, 352, 369, 715, 719, 724, 786, 799, 811) and `plugins/grok-router/scripts/lib/router.mjs` (lines 171-173), folding any needed context into test names or assertion messages.
+3. **C1 (Revert `stopAtPositional: false` on `status` / `result` / `cancel`)**:
+   - Restore `stopAtPositional: true` on `handleStatus`, `handleResult`, and `handleCancel` in `grok-companion.mjs`, and pass `--cwd` before the positional `<jobId>` in `tests/companion.test.mjs`.
