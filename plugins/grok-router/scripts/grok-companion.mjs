@@ -676,7 +676,7 @@ function extractCliMetadata(args, cwd, helpText = "") {
   };
 }
 
-async function handleCli(argv) {
+async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
   const { options, positionals } = parseCliInput(argv);
   const cwd = resolveCwd(options);
   const env = process.env;
@@ -701,7 +701,7 @@ async function handleCli(argv) {
   const meta = extractCliMetadata(args, cwd, help.text);
   if (classification.helpOnly || !meta.hasPromptOrResume) {
     const invocation = grokInvocation(args, env);
-    const result = await runProcess(invocation.command, invocation.args, { cwd, env, timeoutMs });
+    const result = await runProcessImpl(invocation.command, invocation.args, { cwd, env, timeoutMs });
     if (result.stdout) {
       process.stdout.write(result.stdout);
     }
@@ -777,7 +777,7 @@ async function handleCli(argv) {
   let rawResult = null;
   await runTrackedJob(job, async (hooks) => {
     appendLogLine(logFile, `Invoking Grok cli: ${args.join(" ")}`);
-    const result = await runProcess(invocation.command, invocation.args, {
+    const result = await runProcessImpl(invocation.command, invocation.args, {
       cwd,
       env,
       timeoutMs,
@@ -1227,10 +1227,12 @@ export {
   buildRouterRequest,
   classifyCliArgs,
   discoverRoutedSurface,
+  handleCli,
   handleRouted,
   main,
   parseCommandInput,
   parseRoutedInput,
   pluginVersion,
-  PUBLIC_COMMANDS
+  PUBLIC_COMMANDS,
+  resolveKnownSessionId
 };
