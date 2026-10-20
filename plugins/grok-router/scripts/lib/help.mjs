@@ -141,5 +141,5 @@ export function extractVersion(text) {
 }
 
 export function optionName(flag) {
-  return String(flag ?? "").replace(/^--/, "");
+  return String(flag ?? "").replace(/^-+/, "");
 }
