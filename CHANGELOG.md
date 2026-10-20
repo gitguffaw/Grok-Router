@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.8
+
+- Managed controls (`--model`/`-m`, `--effort`/`--reasoning-effort`, `--continue`/`-c`, `--prompt-file`, and named `--resume`/`-r`) are emitted once via `request.controls` instead of being duplicated by `nativeArgs` forwarding.
+- `exec --lanes` parses the lane list as a value option rather than a boolean flag.
+- `cli` preserves passthrough flags such as `--resume` instead of consuming them with the router option seed, and records every `cli` invocation as a tracked router job (`grokSessionId`, `resumeOf`, stored prompt/result/log, `status`/`result`/`cancel`).
+- Managed modes (`analyze`, `exec`, `rescue`, `adversarial-review`) read `--prompt-file <path>` when provided and pass the routed prompt to `grok` via a job prompt file.
 - The MCP server answers initialize with one JSON line, and `.mcp.json` starts that server from the plugin directory. A session opened in another repo can connect.
 
 ## 0.3.7

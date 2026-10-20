@@ -1,5 +1,5 @@
 {
   "name": "grok-router",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Delegate Antigravity work to the local Grok CLI through grok-companion."
 }
