@@ -7,10 +7,13 @@ import { fileURLToPath } from "node:url";
 import { hasLeadingHelpFlag, parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { createContextPack } from "./lib/context-pack.mjs";
 import {
+  extractGrokText,
+  extractSessionId,
   getGrokAuthStatus,
   getGrokAvailability,
   grokHome,
   grokInvocation,
+  managedTimeoutMs,
   readGrokHelp,
   readGrokInspect,
   readGrokModels,
@@ -384,9 +387,97 @@ function parseCliInput(argv) {
   return parseArgs(normalizeArgv(argv), CLI_PARSE_CONFIG);
 }
 
+function parseJsonOrNull(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function findPriorJobForResume(workspaceRoot, target, env = process.env) {
+  if (!target || target === true) {
+    return null;
+  }
+  const ref = String(target).trim();
+  if (!ref) {
+    return null;
+  }
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
+  return (
+    jobs.find((job) => job.id === ref) ??
+    jobs.find((job) => job.grokSessionId === ref && !job.resumeOf) ??
+    jobs.find((job) => job.grokSessionId === ref) ??
+    null
+  );
+}
+
+function extractCliMetadata(args, cwd) {
+  let resume = null;
+  let prompt = null;
+  let promptFile = null;
+  let model = null;
+  let effort = null;
+  let tools = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const token = String(args[i] ?? "");
+    const next = args[i + 1];
+    if ((token === "--resume" || token === "-r") && next && !String(next).startsWith("-")) {
+      resume = String(next);
+      i += 1;
+    } else if (token.startsWith("--resume=")) {
+      resume = token.slice("--resume=".length);
+    } else if ((token === "-p" || token === "--single") && next !== undefined) {
+      prompt = String(next);
+      i += 1;
+    } else if (token.startsWith("--single=")) {
+      prompt = token.slice("--single=".length);
+    } else if (token === "--prompt-file" && next !== undefined) {
+      promptFile = String(next);
+      i += 1;
+    } else if (token.startsWith("--prompt-file=")) {
+      promptFile = token.slice("--prompt-file=".length);
+    } else if ((token === "-m" || token === "--model") && next !== undefined) {
+      model = String(next);
+      i += 1;
+    } else if (token.startsWith("--model=")) {
+      model = token.slice("--model=".length);
+    } else if ((token === "--effort" || token === "--reasoning-effort") && next !== undefined) {
+      effort = String(next);
+      i += 1;
+    } else if (token.startsWith("--effort=")) {
+      effort = token.slice("--effort=".length);
+    } else if (token.startsWith("--reasoning-effort=")) {
+      effort = token.slice("--reasoning-effort=".length);
+    } else if (token === "--tools" && next !== undefined) {
+      tools = String(next);
+      i += 1;
+    } else if (token.startsWith("--tools=")) {
+      tools = token.slice("--tools=".length);
+    }
+  }
+  if (!prompt && promptFile) {
+    try {
+      prompt = fs.readFileSync(path.resolve(cwd, promptFile), "utf8").trim();
+    } catch {
+      prompt = promptFile;
+    }
+  }
+  return {
+    resume,
+    prompt,
+    promptFile,
+    model,
+    effort,
+    tools,
+    continue: args.includes("--continue") || args.includes("-c")
+  };
+}
+
 async function handleCli(argv) {
   const { options, positionals } = parseCliInput(argv);
   const cwd = resolveCwd(options);
+  const env = process.env;
   const args = positionals;
   if (!args.length) {
     throw new Error("Provide Grok CLI arguments, for example: grok-router cli --help");
@@ -394,7 +485,7 @@ async function handleCli(argv) {
   if (args[0] === "grok") {
     throw new Error("Do not include the grok binary name; provide only Grok CLI args.");
   }
-  const help = readGrokHelp(cwd);
+  const help = readGrokHelp(cwd, env);
   const classification = classifyCliArgs(args, help.text);
   if (classification.mutating && !options["allow-mutating"]) {
     throw new Error("Raw Grok command may mutate configuration or install state. Re-run with --allow-mutating only when the user explicitly requested this action.");
@@ -402,15 +493,97 @@ async function handleCli(argv) {
   if (classification.unclassified && !options["allow-mutating"]) {
     throw new Error("Raw Grok command is not classified yet. Re-run with --allow-mutating when the user explicitly requested it, or pass a known grok subcommand.");
   }
-  const invocation = grokInvocation(args);
-  const result = await runProcess(invocation.command, invocation.args, { cwd, env: process.env });
-  if (result.stdout) {
-    process.stdout.write(result.stdout);
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const meta = extractCliMetadata(args, cwd);
+  const priorJob = findPriorJobForResume(workspaceRoot, meta.resume, env);
+  const resumeSessionId = priorJob?.grokSessionId ?? meta.resume ?? null;
+  const resumeOf = priorJob?.id ?? meta.resume ?? null;
+  const userRequest = (meta.prompt ?? args.join(" ")).trim();
+  const write = args.includes("--always-approve") || args.includes("--yolo") || Boolean(classification.mutating);
+  const jobId = generateJobId("cli");
+  const logFile = createJobLogFile(workspaceRoot, jobId, "Grok CLI", env);
+  const request = {
+    mode: "cli",
+    workflow: "CLI",
+    write,
+    tools: meta.tools,
+    prompt: userRequest,
+    userRequest,
+    controls: {
+      model: meta.model,
+      effort: meta.effort,
+      timeoutMs: options["timeout-ms"] ?? null,
+      resume: resumeSessionId,
+      continue: meta.continue
+    },
+    nativeArgs: args
+  };
+  const job = saveJob(workspaceRoot, {
+    id: jobId,
+    jobClass: "grok",
+    kindLabel: "CLI",
+    mode: "cli",
+    title: userRequest.slice(0, 96),
+    summary: userRequest.slice(0, 96),
+    workspaceRoot,
+    status: "queued",
+    phase: "queued",
+    write,
+    request,
+    resumeOf,
+    grokSessionId: resumeSessionId,
+    logFile,
+    createdAt: new Date().toISOString()
+  }, env);
+  emitJobStarted({ ...job, status: "running" });
+
+  const invocation = grokInvocation(args, env);
+  let rawResult = null;
+  await runTrackedJob(job, async (hooks) => {
+    appendLogLine(logFile, `Invoking Grok cli: ${args.join(" ")}`);
+    const result = await runProcess(invocation.command, invocation.args, {
+      cwd,
+      env,
+      timeoutMs: managedTimeoutMs(options["timeout-ms"]),
+      onSpawn: (processRecord) => hooks.updateProcess(processRecord),
+      onStdout: (chunk) => appendLogLine(logFile, chunk),
+      onStderr: (chunk) => appendLogLine(logFile, chunk)
+    });
+    rawResult = result;
+    const parsed = parseJsonOrNull(result.stdout?.trim?.() ? result.stdout.trim() : result.stdout);
+    const sessionId = extractSessionId(parsed, result.stdout) ?? resumeSessionId;
+    const text = extractGrokText(parsed, result.stdout);
+    const exitStatus = result.error ? 1 : (result.status ?? 1);
+    const jobStatus = result.timedOut ? "failed" : exitStatus === 0 ? "completed" : "failed";
+    return {
+      exitStatus,
+      jobStatus,
+      phase: result.timedOut ? "timed-out" : jobStatus === "completed" ? "done" : "failed",
+      grokSessionId: sessionId,
+      payload: {
+        mode: "cli",
+        workflow: "CLI",
+        command: invocation.command,
+        args,
+        timedOut: Boolean(result.timedOut),
+        signal: result.signal,
+        rawOutput: text,
+        parsedOutput: parsed,
+        structuredOutput: parsed?.structuredOutput ?? null,
+        stderr: result.stderr,
+        sessionId
+      },
+      rendered: (text || result.stderr || (result.error ? result.error.message : `Grok exited ${exitStatus} with no result.`)).trimEnd()
+    };
+  }, { env, trackChildProcess: true });
+
+  if (rawResult?.stdout) {
+    process.stdout.write(rawResult.stdout);
   }
-  if (result.stderr) {
-    process.stderr.write(result.stderr);
+  if (rawResult?.stderr) {
+    process.stderr.write(rawResult.stderr);
   }
-  process.exitCode = result.status ?? 1;
+  process.exitCode = rawResult?.status ?? 1;
 }
 
 async function runStoredJob(workspaceRoot, jobId, options = {}) {
@@ -486,6 +659,12 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
       options.resume = sessionId;
     }
   }
+  const priorJob = options.resume && options.resume !== true
+    ? findPriorJobForResume(workspaceRoot, options.resume, env)
+    : null;
+  if (priorJob?.grokSessionId && options.resume === priorJob.id) {
+    options.resume = priorJob.grokSessionId;
+  }
   const models = readGrokModels(cwd, env);
   const version = readGrokVersion(cwd, env);
   const gitBefore = readGitStatus(workspaceRoot);
@@ -502,6 +681,7 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     nativeControls: nativeControls ?? [],
     diff
   });
+  const resumeOf = priorJob?.id ?? request.controls?.resume ?? null;
   const jobId = generateJobId(mode);
   if (mode === "review" || mode === "adversarial-review" || Boolean(options["prompt-file"])) {
     const promptFile = path.join(resolveJobsDir(workspaceRoot, env), `${jobId}.prompt.txt`);
@@ -523,6 +703,8 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     phase: options.background ? "background" : "queued",
     write: request.write,
     request,
+    resumeOf,
+    grokSessionId: request.controls?.resume ?? null,
     contextPack,
     logFile,
     createdAt: new Date().toISOString()
