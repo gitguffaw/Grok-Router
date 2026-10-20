@@ -598,3 +598,40 @@ test("cli only tracks prompt or resume runs, does not impose a 30m default timeo
     assert.match(badCli.stderr, new RegExp(routerFlag));
   }
 });
+
+test("cli -r <SID> preserves an explicit raw session ID even when a prior job with that resume target returned a different session", () => {
+  const tempDir = makeTempDir();
+  const sessionA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const sessionB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  const turn2 = runCompanion(
+    ["cli", "-r", sessionA, "-p", "Forked or reassigned turn", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_FORCE_SESSION: sessionB }
+  );
+  assert.equal(turn2.status, 0, turn2.stderr + turn2.stdout);
+
+  const turn3 = runCompanion(
+    ["cli", "-r", sessionA, "-p", "Explicitly resume original session A", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(turn3.status, 0, turn3.stderr + turn3.stdout);
+  const { argv } = readArgv(tempDir);
+  assert.equal(argv[argv.indexOf("-r") + 1], sessionA);
+});
+
+test("cli -r <jobId> and managed --resume <jobId> fail clearly when the referenced job has no known Grok session", () => {
+  const tempDir = makeTempDir();
+  const plainTurn = runCompanion(["cli", "-p", "Plain output with no session ID."], tempDir);
+  assert.equal(plainTurn.status, 0, plainTurn.stderr + plainTurn.stdout);
+  const jobId = plainTurn.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(jobId);
+
+  const cliResumeUnknown = runCompanion(["cli", "-r", jobId, "-p", "Try to resume."], tempDir);
+  assert.notEqual(cliResumeUnknown.status, 0);
+  assert.match(cliResumeUnknown.stderr, new RegExp(`job ${jobId} has no known Grok session`, "i"));
+
+  const managedResumeUnknown = runCompanion(["analyze", "--resume", jobId, "Try to resume."], tempDir);
+  assert.notEqual(managedResumeUnknown.status, 0);
+  assert.match(managedResumeUnknown.stderr, new RegExp(`job ${jobId} has no known Grok session`, "i"));
+});

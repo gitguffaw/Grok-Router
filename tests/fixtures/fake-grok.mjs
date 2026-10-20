@@ -108,7 +108,7 @@ if (promptIndex !== -1 || promptFileIndex !== -1) {
   const payload = {
     text,
     stopReason: "end_turn",
-    sessionId: resumedSession || process.env.GROK_FAKE_SESSION || "11111111-1111-4111-8111-111111111111",
+    sessionId: process.env.GROK_FAKE_FORCE_SESSION || resumedSession || process.env.GROK_FAKE_SESSION || "11111111-1111-4111-8111-111111111111",
     requestId: "req-fake"
   };
   if (argv.includes("--json-schema")) {
