@@ -293,7 +293,7 @@ test("analyze --prompt-file reads the prompt from the file and runs the job", ()
   assert.ok(!argv.includes("-p"));
 });
 
-test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tracked as router jobs with resumeOf", () => {
+test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tracked as router jobs with resumeOf", async () => {
   const tempDir = makeTempDir();
   const sid = "33333333-3333-4333-8333-333333333333";
 
@@ -311,6 +311,7 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(turn1Result.status, 0, turn1Result.stderr);
   assert.match(turn1Result.stdout, new RegExp(`Resume in Grok: grok --resume ${sid}`));
 
+  // Turn 2 via cli -r <SID>
   const cliTurn = runCompanion(
     [
       "cli",
@@ -346,6 +347,7 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.ok(cliJob.rendered.includes("Quote the question I asked in the previous turn."));
   assert.ok(cliJob.logFile && fs.existsSync(cliJob.logFile));
 
+  // Turn 3 via managed analyze --resume <SID>: links turn-by-turn to cliJobId (Turn 2) and passes read-only --tools in grok argv
   const analyzeResumed = runCompanion(
     ["analyze", "--resume", sid, "--json", "Quote the question I asked in the previous turn."],
     tempDir
@@ -354,8 +356,110 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   const analyzeJob = JSON.parse(analyzeResumed.stdout);
   assert.equal(analyzeJob.status, "completed");
   assert.equal(analyzeJob.grokSessionId, sid);
-  assert.equal(analyzeJob.resumeOf, turn1Id);
-  assert.equal(analyzeJob.request.tools, "read_file,grep,list_dir");
+  assert.equal(analyzeJob.resumeOf, cliJobId);
+  const { argv: analyzeArgv } = readArgv(tempDir);
+  assert.equal(analyzeArgv.filter((arg) => arg === "--resume" || arg === "-r").length, 1);
+  assert.equal(analyzeArgv[analyzeArgv.indexOf("--resume") + 1], sid);
+  assert.ok(analyzeArgv.includes("--tools"));
+  assert.equal(analyzeArgv[analyzeArgv.indexOf("--tools") + 1], "read_file,grep,list_dir");
+  assert.ok(!analyzeArgv.includes("--always-approve"));
+
+  // Turn 4 via cli -r <jobId> with plain output: translates router job ID to session ID in grok argv, links resumeOf to Turn 3, and records grokSessionId as "unknown" when output has no session
+  const cliByJobIdPlain = runCompanion(
+    ["cli", "-r", analyzeJob.id, "-p", "Plain output turn."],
+    tempDir
+  );
+  assert.equal(cliByJobIdPlain.status, 0, cliByJobIdPlain.stderr + cliByJobIdPlain.stdout);
+  const { argv: cliJobIdArgv } = readArgv(tempDir);
+  assert.equal(cliJobIdArgv[cliJobIdArgv.indexOf("-r") + 1], sid);
+  const cliByJobIdMatch = cliByJobIdPlain.stderr.match(/Job ID:\s+(\S+)/);
+  assert.ok(cliByJobIdMatch);
+  const cliByJobIdStored = JSON.parse(runCompanion(["result", "--json", cliByJobIdMatch[1]], tempDir).stdout);
+  assert.equal(cliByJobIdStored.resumeOf, analyzeJob.id);
+  assert.equal(cliByJobIdStored.grokSessionId, "unknown");
+
+  // Unknown raw session ID has resumeOf: null (never a raw session ID)
+  const unknownSid = "99999999-9999-4999-8999-999999999999";
+  const cliUnknownResume = runCompanion(
+    ["cli", "-r", unknownSid, "-p", "Resume unknown session.", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(cliUnknownResume.status, 0);
+  const cliUnknownId = cliUnknownResume.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  const cliUnknownJob = JSON.parse(runCompanion(["result", "--json", cliUnknownId], tempDir).stdout);
+  assert.equal(cliUnknownJob.resumeOf, null);
+  assert.equal(cliUnknownJob.grokSessionId, unknownSid);
+
+  // Failed resume does not record a session it never got (both cli and managed)
+  const failedCliResume = runCompanion(
+    ["cli", "-r", sid, "-p", "Fail on purpose.", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_AUTH: "1" }
+  );
+  assert.notEqual(failedCliResume.status, 0);
+  const failedCliId = failedCliResume.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(failedCliId);
+  const failedCliJob = JSON.parse(runCompanion(["result", "--json", failedCliId], tempDir).stdout);
+  assert.equal(failedCliJob.status, "failed");
+  assert.equal(failedCliJob.grokSessionId, null);
+
+  const failedManagedResume = runCompanion(
+    ["analyze", "--resume", sid, "--json", "Fail managed on purpose."],
+    tempDir,
+    { GROK_FAKE_AUTH: "1" }
+  );
+  assert.notEqual(failedManagedResume.status, 0);
+  const failedManagedJob = JSON.parse(failedManagedResume.stdout);
+  assert.equal(failedManagedJob.status, "failed");
+  assert.equal(failedManagedJob.grokSessionId, null);
+
+  // Timeout on cli
+  const timedOutCli = runCompanion(
+    ["cli", "--timeout-ms", "80", "-r", sid, "-p", "Slow turn.", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_SLEEP_MS: "2000" }
+  );
+  assert.notEqual(timedOutCli.status, 0);
+  const timedOutCliId = timedOutCli.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(timedOutCliId);
+  const timedOutJob = JSON.parse(runCompanion(["result", "--json", timedOutCliId], tempDir).stdout);
+  assert.equal(timedOutJob.status, "failed");
+  assert.equal(timedOutJob.phase, "timed-out");
+  assert.equal(timedOutJob.result.timedOut, true);
+  assert.equal(timedOutJob.grokSessionId, null);
+
+  // Cancellation on cli
+  const cancelChild = spawn(
+    process.execPath,
+    [COMPANION, "cli", "-r", sid, "-p", "Cancel me.", "--output-format", "json"],
+    {
+      cwd: tempDir,
+      env: { ...testEnv(tempDir), GROK_FAKE_SLEEP_MS: "5000" },
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
+  let cancelStderr = "";
+  let cancelJobId = null;
+  cancelChild.stderr.setEncoding("utf8");
+  cancelChild.stderr.on("data", (chunk) => {
+    cancelStderr += chunk;
+    const match = cancelStderr.match(/Job ID:\s+(\S+)/);
+    if (match) {
+      cancelJobId = match[1];
+    }
+  });
+  const waitDeadline = Date.now() + 2000;
+  while (!cancelJobId && Date.now() < waitDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(cancelJobId, `expected cli Job ID before cancel; stderr=${cancelStderr}`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const cancelRes = runCompanion(["cancel", "--json", cancelJobId], tempDir);
+  assert.equal(cancelRes.status, 0, cancelRes.stderr);
+  const cancelledJob = JSON.parse(cancelRes.stdout);
+  assert.equal(cancelledJob.status, "cancelled");
+  assert.equal(cancelledJob.grokSessionId, null);
+  await new Promise((resolve) => cancelChild.on("close", resolve));
 });
 
 test("exec --lanes with --prompt-file reads the prompt file for each lane", () => {
