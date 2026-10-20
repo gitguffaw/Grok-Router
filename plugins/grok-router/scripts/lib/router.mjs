@@ -17,13 +17,21 @@ const MANAGED_CONTROL_OPTIONS = new Set(["model", "reasoning-effort", "effort", 
 
 function resolvePromptText(prompt, options = {}) {
   const inline = String(prompt ?? "").trim();
-  const promptFile = options["prompt-file"] ?? options.prompt_file ?? options.promptFile ?? null;
+  const promptFile = options["prompt-file"] ?? null;
   if (!promptFile || promptFile === true) {
     return inline;
   }
   const baseDir = options.cwd ? path.resolve(process.cwd(), String(options.cwd)) : process.cwd();
   const resolvedPath = path.resolve(baseDir, String(promptFile));
-  const fromFile = fs.readFileSync(resolvedPath, "utf8").trim();
+  let fromFile;
+  try {
+    fromFile = fs.readFileSync(resolvedPath, "utf8").trim();
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      throw new Error(`Prompt file not found: ${resolvedPath}`);
+    }
+    throw new Error(`Unable to read prompt file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (inline && fromFile) {
     return `${fromFile}\n\n${inline}`;
   }
