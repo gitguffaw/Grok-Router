@@ -377,43 +377,96 @@ function classifyCliArgs(args, helpText) {
   return { helpOnly, mutating, unclassified, first };
 }
 
-const CLI_PARSE_CONFIG = {
-  valueOptions: ["cwd", "timeout-ms", "base", "scope", "tool", "lanes", "lane"],
-  booleanOptions: [
-    "allow-mutating",
-    "allow-dangerous",
-    "json",
-    "background",
-    "wait",
-    "best",
-    "lean",
-    "full",
-    "search",
-    "docs",
-    "parallel",
-    "panel",
-    "all",
-    "write",
-    "fresh",
-    "resume-last",
-    "enable-review-gate",
-    "disable-review-gate"
-  ],
-  arrayOptions: ["tool"],
-  aliasMap: { C: "cwd" },
-  stopAtPositional: false
-};
-
 const CLI_ALLOWED_ROUTER_OPTIONS = new Set(["cwd", "timeout-ms", "allow-mutating", "allow-dangerous"]);
+const CLI_REJECTED_ROUTER_OPTIONS = new Set([
+  "base",
+  "scope",
+  "tool",
+  "lanes",
+  "lane",
+  "json",
+  "background",
+  "wait",
+  "best",
+  "lean",
+  "full",
+  "search",
+  "docs",
+  "parallel",
+  "panel",
+  "all",
+  "write",
+  "fresh",
+  "resume-last",
+  "enable-review-gate",
+  "disable-review-gate"
+]);
+const CLI_KNOWN_VALUE_FLAGS = new Set(["--agent", "--agents", "--allow", "--allowedTools", "--cwd", "-C", "--debug-file", "--deny", "--disallowed-tools", "--disallowedTools", "--json-schema", "--leader-socket", "-m", "--model", "--max-turns", "--output-format", "-p", "--single", "--permission-mode", "--prompt-file", "--prompt-json", "--reasoning-effort", "--effort", "--rules", "-s", "--session-id", "--sandbox", "--system-prompt-override", "--system-prompt", "--tools", "--worktree-ref", "--ref"]);
+const CLI_KNOWN_OPTIONAL_VALUE_FLAGS = new Set(["-r", "--resume", "-w", "--worktree"]);
 
 function parseCliInput(argv) {
-  const parsed = parseArgs(normalizeArgv(argv), CLI_PARSE_CONFIG);
-  for (const key of Object.keys(parsed.options)) {
-    if (!CLI_ALLOWED_ROUTER_OPTIONS.has(key)) {
-      throw new Error(`--${key} is a router option and is not supported on cli. Pass native grok flags (or use analyze, exec, review, adversarial-review, or rescue).`);
+  const tokens = normalizeArgv(argv);
+  const options = {};
+  const positionals = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = String(tokens[i] ?? "");
+    const next = tokens[i + 1];
+    if (token === "--") {
+      positionals.push("--", ...tokens.slice(i + 1));
+      break;
+    }
+    if (token === "--cwd" || token === "-C") {
+      if (next === undefined) {
+        throw new Error(`Missing value for ${token}`);
+      }
+      options.cwd = next;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--cwd=")) {
+      options.cwd = token.slice("--cwd=".length);
+      continue;
+    }
+    if (token === "--timeout-ms") {
+      if (next === undefined) {
+        throw new Error("Missing value for --timeout-ms");
+      }
+      options["timeout-ms"] = next;
+      i += 1;
+      continue;
+    }
+    if (token.startsWith("--timeout-ms=")) {
+      options["timeout-ms"] = token.slice("--timeout-ms=".length);
+      continue;
+    }
+    if (token === "--allow-mutating" || token === "--allow-dangerous") {
+      options[token.slice(2)] = true;
+      continue;
+    }
+    if (token.startsWith("--allow-mutating=") || token.startsWith("--allow-dangerous=")) {
+      const [rawKey, val] = token.slice(2).split("=", 2);
+      options[rawKey] = val !== "false";
+      continue;
+    }
+    if (token.startsWith("--")) {
+      const eq = token.indexOf("=");
+      const key = eq === -1 ? token.slice(2) : token.slice(2, eq);
+      if (CLI_REJECTED_ROUTER_OPTIONS.has(key) && CLI_ALLOWED_ROUTER_OPTIONS.has(key) === false) {
+        throw new Error(`--${key} is a router option and is not supported on cli. Pass native grok flags (or use analyze, exec, review, adversarial-review, or rescue).`);
+      }
+    }
+    positionals.push(token);
+    if (token.startsWith("-") && !token.includes("=")) {
+      if (CLI_KNOWN_VALUE_FLAGS.has(token) && next !== undefined) {
+        positionals.push(next);
+        i += 1;
+      } else if (CLI_KNOWN_OPTIONAL_VALUE_FLAGS.has(token) && next !== undefined && !String(next).startsWith("-")) {
+        positionals.push(next);
+        i += 1;
+      }
     }
   }
-  return parsed;
+  return { options, positionals };
 }
 
 function parseJsonOrNull(value) {
