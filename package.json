@@ -1,6 +1,6 @@
 {
   "name": "@gitguffaw/grok-router",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "private": true,
   "type": "module",
   "description": "Route host-agent work through the local Grok CLI with live discovery, policy-backed modes, and tracked jobs.",
