@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { shouldEmitLiveProgress, stripHostNoise } from "../plugins/grok-router/scripts/lib/render.mjs";
+import * as companionModule from "../plugins/grok-router/scripts/grok-companion.mjs";
+import { resolveJobFile, saveJob } from "../plugins/grok-router/scripts/lib/state.mjs";
 import { COMPANION, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
 
 test("host only hears ready plus blocking startup errors", () => {
@@ -293,7 +295,7 @@ test("analyze --prompt-file reads the prompt from the file and runs the job", ()
   assert.ok(!argv.includes("-p"));
 });
 
-test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tracked as router jobs with resumeOf", async () => {
+test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tracked as router jobs with turn-by-turn resumeOf", () => {
   const tempDir = makeTempDir();
   const sid = "33333333-3333-4333-8333-333333333333";
 
@@ -364,20 +366,6 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(analyzeArgv[analyzeArgv.indexOf("--tools") + 1], "read_file,grep,list_dir");
   assert.ok(!analyzeArgv.includes("--always-approve"));
 
-  // Turn 4 via cli -r <jobId> with plain output: translates router job ID to session ID in grok argv, links resumeOf to Turn 3, and records grokSessionId as "unknown" when output has no session
-  const cliByJobIdPlain = runCompanion(
-    ["cli", "-r", analyzeJob.id, "-p", "Plain output turn."],
-    tempDir
-  );
-  assert.equal(cliByJobIdPlain.status, 0, cliByJobIdPlain.stderr + cliByJobIdPlain.stdout);
-  const { argv: cliJobIdArgv } = readArgv(tempDir);
-  assert.equal(cliJobIdArgv[cliJobIdArgv.indexOf("-r") + 1], sid);
-  const cliByJobIdMatch = cliByJobIdPlain.stderr.match(/Job ID:\s+(\S+)/);
-  assert.ok(cliByJobIdMatch);
-  const cliByJobIdStored = JSON.parse(runCompanion(["result", "--json", cliByJobIdMatch[1]], tempDir).stdout);
-  assert.equal(cliByJobIdStored.resumeOf, analyzeJob.id);
-  assert.equal(cliByJobIdStored.grokSessionId, "unknown");
-
   // Unknown raw session ID has resumeOf: null (never a raw session ID)
   const unknownSid = "99999999-9999-4999-8999-999999999999";
   const cliUnknownResume = runCompanion(
@@ -389,8 +377,38 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   const cliUnknownJob = JSON.parse(runCompanion(["result", "--json", cliUnknownId], tempDir).stdout);
   assert.equal(cliUnknownJob.resumeOf, null);
   assert.equal(cliUnknownJob.grokSessionId, unknownSid);
+});
 
-  // Failed resume does not record a session it never got (both cli and managed)
+test("cli -r <jobId> translates a router job ID into the Grok session ID in argv and records unknown when output has no session", () => {
+  const tempDir = makeTempDir();
+  const sid = "33333333-3333-4333-8333-333333333333";
+
+  const turn1 = runCompanion(
+    ["analyze", "--json", "Start session."],
+    tempDir,
+    { GROK_FAKE_SESSION: sid }
+  );
+  assert.equal(turn1.status, 0, turn1.stderr + turn1.stdout);
+  const turn1Job = JSON.parse(turn1.stdout);
+
+  const cliByJobIdPlain = runCompanion(
+    ["cli", "-r", turn1Job.id, "-p", "Plain output turn."],
+    tempDir
+  );
+  assert.equal(cliByJobIdPlain.status, 0, cliByJobIdPlain.stderr + cliByJobIdPlain.stdout);
+  const { argv: cliJobIdArgv } = readArgv(tempDir);
+  assert.equal(cliJobIdArgv[cliJobIdArgv.indexOf("-r") + 1], sid);
+  const cliByJobIdMatch = cliByJobIdPlain.stderr.match(/Job ID:\s+(\S+)/);
+  assert.ok(cliByJobIdMatch);
+  const cliByJobIdStored = JSON.parse(runCompanion(["result", "--json", cliByJobIdMatch[1]], tempDir).stdout);
+  assert.equal(cliByJobIdStored.resumeOf, turn1Job.id);
+  assert.equal(cliByJobIdStored.grokSessionId, "unknown");
+});
+
+test("failed resume in cli or managed mode does not record a session it never got", () => {
+  const tempDir = makeTempDir();
+  const sid = "33333333-3333-4333-8333-333333333333";
+
   const failedCliResume = runCompanion(
     ["cli", "-r", sid, "-p", "Fail on purpose.", "--output-format", "json"],
     tempDir,
@@ -412,8 +430,12 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   const failedManagedJob = JSON.parse(failedManagedResume.stdout);
   assert.equal(failedManagedJob.status, "failed");
   assert.equal(failedManagedJob.grokSessionId, null);
+});
 
-  // Timeout on cli
+test("cli --timeout-ms times out a slow run and records phase timed-out", () => {
+  const tempDir = makeTempDir();
+  const sid = "33333333-3333-4333-8333-333333333333";
+
   const timedOutCli = runCompanion(
     ["cli", "--timeout-ms", "80", "-r", sid, "-p", "Slow turn.", "--output-format", "json"],
     tempDir,
@@ -427,8 +449,12 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(timedOutJob.phase, "timed-out");
   assert.equal(timedOutJob.result.timedOut, true);
   assert.equal(timedOutJob.grokSessionId, null);
+});
 
-  // Cancellation on cli
+test("cancel stops an active cli job and persists cancelled state on disk", async () => {
+  const tempDir = makeTempDir();
+  const sid = "33333333-3333-4333-8333-333333333333";
+
   const cancelChild = spawn(
     process.execPath,
     [COMPANION, "cli", "-r", sid, "-p", "Cancel me.", "--output-format", "json"],
@@ -460,12 +486,19 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(cancelledJob.status, "cancelled");
   assert.equal(cancelledJob.grokSessionId, null);
   await new Promise((resolve) => cancelChild.on("close", resolve));
+
+  const storedAfterClose = JSON.parse(runCompanion(["result", "--json", cancelJobId], tempDir).stdout);
+  assert.equal(storedAfterClose.status, "cancelled");
+  assert.equal(storedAfterClose.phase, "cancelled");
+  assert.equal(storedAfterClose.pid, null);
+  assert.equal(storedAfterClose.grokSessionId, null);
 });
 
-test("exec --lanes with --prompt-file reads the prompt file for each lane", () => {
+test("exec --lanes with --prompt-file reads the prompt file for each lane exactly once", () => {
   const tempDir = makeTempDir();
   const pf = path.join(tempDir, "lane-prompt.txt");
-  fs.writeFileSync(pf, "Implement the lane acceptance criteria.\n", "utf8");
+  const promptText = "Implement the lane acceptance criteria.";
+  fs.writeFileSync(pf, `${promptText}\n`, "utf8");
   const result = runCompanion(
     ["exec", "--lanes", "alpha,beta", "--prompt-file", pf, "--best", "--json"],
     tempDir
@@ -480,8 +513,8 @@ test("exec --lanes with --prompt-file reads the prompt file for each lane", () =
     assert.equal(leafResult.status, 0, leafResult.stderr);
     const leaf = JSON.parse(leafResult.stdout);
     assert.equal(leaf.status, "completed");
-    assert.equal(leaf.request.userRequest, "Implement the lane acceptance criteria.");
-    assert.ok(leaf.request.prompt.includes("Implement the lane acceptance criteria."));
+    assert.equal(leaf.request.userRequest, promptText);
+    assert.equal(leaf.request.prompt.split(promptText).length - 1, 1);
     assert.ok(leaf.request.prompt.includes(`Lane: ${lane.label}.`));
     assert.ok(leaf.request.promptFile && fs.existsSync(leaf.request.promptFile));
   }
@@ -520,10 +553,9 @@ test("--prompt-file stores file contents in cli and reports a clear error when m
   }
 });
 
-test("cli only tracks prompt or resume runs, does not impose a 30m default timeout, marks editing tools as write:true, parses -p and --continue cleanly, and rejects router-only flags", () => {
+test("cli only tracks prompt or session-resume runs and leaves help/discovery subcommands untracked", () => {
   const tempDir = makeTempDir();
 
-  // Finding 1: non-prompt subcommands (`cli --help`, `cli models`, `cli clone --help`) are not tracked as jobs
   const helpRun = runCompanion(["cli", "--help"], tempDir);
   assert.equal(helpRun.status, 0, helpRun.stderr);
   assert.equal(/Job ID:/.test(helpRun.stderr), false);
@@ -539,8 +571,52 @@ test("cli only tracks prompt or resume runs, does not impose a 30m default timeo
   const statusAfterDiscovery = runCompanion(["status", "--all", "--json"], tempDir);
   assert.equal(statusAfterDiscovery.status, 0, statusAfterDiscovery.stderr);
   assert.equal(JSON.parse(statusAfterDiscovery.stdout).jobs.length, 0);
+});
 
-  // Finding 6 & 3 & 2: positional prompt has no trailing flags attached, editing tools set write:true, and timeoutMs is null by default
+test("cli passes no timeout (0) to runProcess when --timeout-ms is absent", async () => {
+  const tempDir = makeTempDir();
+  const env = testEnv(tempDir);
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, env);
+  const origSetTimeout = globalThis.setTimeout;
+  const origStdoutWrite = process.stdout.write.bind(process.stdout);
+  const scheduledDelays = [];
+  globalThis.setTimeout = function wrappedSetTimeout(fn, delay, ...rest) {
+    if (Number(delay) >= 1000) {
+      scheduledDelays.push(Number(delay));
+    }
+    return origSetTimeout.call(this, fn, delay, ...rest);
+  };
+  process.stdout.write = () => true;
+  let capturedRunProcessTimeoutMs;
+  try {
+    await companionModule.main(["cli", "--cwd", tempDir, "-p", "Check default timeout", "--output-format", "json"]);
+    assert.deepEqual(scheduledDelays, [], `expected no timeout timer in runProcess, got ${JSON.stringify(scheduledDelays)}`);
+
+    assert.equal(typeof companionModule.handleCli, "function");
+    await companionModule.handleCli(["--cwd", tempDir, "-p", "Check runProcess options", "--output-format", "json"], {
+      runProcessImpl: async (_cmd, _args, opts) => {
+        capturedRunProcessTimeoutMs = opts.timeoutMs;
+        return { status: 0, stdout: '{"text":"ok","sessionId":"11111111-1111-4111-8111-111111111111"}\n', stderr: "", timedOut: false };
+      }
+    });
+    assert.equal(capturedRunProcessTimeoutMs, 0);
+  } finally {
+    process.stdout.write = origStdoutWrite;
+    globalThis.setTimeout = origSetTimeout;
+    for (const key of Object.keys(env)) {
+      if (!(key in prevEnv)) {
+        delete process.env[key];
+      } else {
+        process.env[key] = prevEnv[key];
+      }
+    }
+  }
+});
+
+test("cli marks editing tools as write:true and read-only tools as write:false", () => {
+  const tempDir = makeTempDir();
+
   const editRun = runCompanion(
     ["cli", "--raw-arg-string", '-p "Hello" --tools read_file,edit_file --output-format json'],
     tempDir
@@ -549,12 +625,23 @@ test("cli only tracks prompt or resume runs, does not impose a 30m default timeo
   const editJobId = editRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   assert.ok(editJobId);
   const editJob = JSON.parse(runCompanion(["result", "--json", editJobId], tempDir).stdout);
-  assert.equal(editJob.request.prompt, "Hello");
-  assert.equal(editJob.request.userRequest, "Hello");
-  assert.equal(editJob.title, "Hello");
   assert.equal(editJob.write, true);
   assert.equal(editJob.request.write, true);
-  assert.equal(editJob.request.controls.timeoutMs, null);
+
+  const readOnlyRun = runCompanion(
+    ["cli", "-p", "Check status", "--tools", "read_file,grep,list_dir", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(readOnlyRun.status, 0, readOnlyRun.stderr + readOnlyRun.stdout);
+  const readOnlyJobId = readOnlyRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(readOnlyJobId);
+  const readOnlyJob = JSON.parse(runCompanion(["result", "--json", readOnlyJobId], tempDir).stdout);
+  assert.equal(readOnlyJob.write, false);
+  assert.equal(readOnlyJob.request.write, false);
+});
+
+test("cli extractCliMetadata strips trailing flags from prompts and does not treat -p --continue as continue:true", () => {
+  const tempDir = makeTempDir();
 
   const positionalPromptWithTrailingFlags = runCompanion(
     ["cli", "-r", "11111111-1111-4111-8111-111111111111", "Hello", "--output-format", "json"],
@@ -566,20 +653,8 @@ test("cli only tracks prompt or resume runs, does not impose a 30m default timeo
   const posPromptJob = JSON.parse(runCompanion(["result", "--json", posPromptId], tempDir).stdout);
   assert.equal(posPromptJob.request.prompt, "Hello");
   assert.equal(posPromptJob.request.userRequest, "Hello");
+  assert.equal(posPromptJob.title, "Hello");
 
-  // Read-only tools stay write:false
-  const readOnlyRun = runCompanion(
-    ["cli", "-p", "Check status", "--tools", "read_file,grep,list_dir", "--output-format", "json"],
-    tempDir
-  );
-  assert.equal(readOnlyRun.status, 0, readOnlyRun.stderr + readOnlyRun.stdout);
-  const readOnlyJobId = readOnlyRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
-  assert.ok(readOnlyJobId);
-  const readOnlyJob = JSON.parse(runCompanion(["result", "--json", readOnlyJobId], tempDir).stdout);
-  assert.equal(readOnlyJob.write, false);
-  assert.equal(readOnlyJob.request.write, false);
-
-  // Finding 6: `-p --continue` does not become both prompt "--continue" and continue:true
   const literalContinuePrompt = runCompanion(
     ["cli", "-p", "--continue", "--output-format", "json"],
     tempDir
@@ -590,13 +665,65 @@ test("cli only tracks prompt or resume runs, does not impose a 30m default timeo
   const literalContinueJob = JSON.parse(runCompanion(["result", "--json", literalContinueId], tempDir).stdout);
   assert.equal(literalContinueJob.request.prompt, "--continue");
   assert.equal(literalContinueJob.request.controls.continue, false);
+});
 
-  // Finding 11: router-only flags on cli are rejected clearly instead of silently forwarded to grok
+test("cli rejects router-only flags such as --json, --background, --lean, and --best", () => {
+  const tempDir = makeTempDir();
   for (const routerFlag of ["--json", "--background", "--lean", "--best"]) {
     const badCli = runCompanion(["cli", routerFlag, "-p", "Hello"], tempDir);
     assert.notEqual(badCli.status, 0, `expected cli ${routerFlag} to fail`);
     assert.match(badCli.stderr, new RegExp(routerFlag));
   }
+});
+
+test("resolveKnownSessionId walks a resume chain of three or more jobs and handles a missing or unreadable job file in the middle", () => {
+  const tempDir = makeTempDir();
+  const env = testEnv(tempDir);
+  const rootSid = "44444444-4444-4444-8444-444444444444";
+
+  const job1 = saveJob(tempDir, {
+    id: "analyze-hop1",
+    jobClass: "grok",
+    mode: "analyze",
+    workspaceRoot: tempDir,
+    status: "completed",
+    grokSessionId: rootSid,
+    resumeOf: null,
+    request: { controls: { resume: null } }
+  }, env);
+  const job2 = saveJob(tempDir, {
+    id: "cli-hop2",
+    jobClass: "grok",
+    mode: "cli",
+    workspaceRoot: tempDir,
+    status: "completed",
+    grokSessionId: "unknown",
+    resumeOf: job1.id,
+    request: { controls: { resume: null } }
+  }, env);
+  const job3 = saveJob(tempDir, {
+    id: "cli-hop3",
+    jobClass: "grok",
+    mode: "cli",
+    workspaceRoot: tempDir,
+    status: "completed",
+    grokSessionId: "unknown",
+    resumeOf: job2.id,
+    request: { controls: { resume: null } }
+  }, env);
+
+  // Walks 3-job chain (job3 -> job2 -> job1) and finds rootSid
+  assert.equal(typeof companionModule.resolveKnownSessionId, "function");
+  assert.equal(companionModule.resolveKnownSessionId(tempDir, job3, env), rootSid);
+
+  // Corrupt middle job file (job2) -> returns null without throwing
+  const job2File = resolveJobFile(tempDir, job2.id, env);
+  fs.writeFileSync(job2File, "{corrupted json", "utf8");
+  assert.equal(companionModule.resolveKnownSessionId(tempDir, job3, env), null);
+
+  // Remove middle job file (job2) -> returns null without throwing
+  fs.unlinkSync(job2File);
+  assert.equal(companionModule.resolveKnownSessionId(tempDir, job3, env), null);
 });
 
 test("cli -r <SID> preserves an explicit raw session ID even when a prior job with that resume target returned a different session", () => {
