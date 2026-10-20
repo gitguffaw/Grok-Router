@@ -495,6 +495,15 @@ function findPriorJobForResume(workspaceRoot, target, env = process.env) {
   );
 }
 
+function findPriorJobForContinue(workspaceRoot, cwd, env = process.env) {
+  const normalizedCwd = path.resolve(cwd);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
+  return (
+    jobs.find((job) => job.jobClass !== "grok-panel" && path.resolve(job.cwd ?? job.workspaceRoot ?? workspaceRoot) === normalizedCwd) ??
+    null
+  );
+}
+
 function resolveKnownSessionId(workspaceRoot, job, env = process.env) {
   if (!job) {
     return null;
@@ -704,7 +713,9 @@ async function handleCli(argv) {
   }
 
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const priorJob = findPriorJobForResume(workspaceRoot, meta.resume, env);
+  const priorJob = meta.resume && meta.resume !== true
+    ? findPriorJobForResume(workspaceRoot, meta.resume, env)
+    : (meta.continue ? findPriorJobForContinue(workspaceRoot, cwd, env) : null);
   const resumedByJobId = Boolean(priorJob && meta.resume === priorJob.id);
   const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
   if (resumedByJobId && !priorSessionId) {
@@ -749,6 +760,7 @@ async function handleCli(argv) {
     mode: "cli",
     title: userRequest.slice(0, 96),
     summary: userRequest.slice(0, 96),
+    cwd,
     workspaceRoot,
     status: "queued",
     phase: "queued",
@@ -886,7 +898,7 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
   }
   const priorJob = options.resume && options.resume !== true
     ? findPriorJobForResume(workspaceRoot, options.resume, env)
-    : null;
+    : (options.continue ? findPriorJobForContinue(workspaceRoot, cwd, env) : null);
   const resumedByJobId = Boolean(priorJob && options.resume === priorJob.id);
   const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
   if (resumedByJobId && !priorSessionId) {
@@ -928,6 +940,7 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     mode,
     title: request.userRequest.slice(0, 96),
     summary: request.userRequest.slice(0, 96),
+    cwd,
     workspaceRoot,
     status: "queued",
     phase: options.background ? "background" : "queued",
@@ -1091,7 +1104,7 @@ async function runPanel(mode, { options, prompt, lanes, nativeControls, cwd, env
 }
 
 async function handleStatus(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: true });
+  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
   const cwd = resolveCwd(options);
   refreshStaleJobs(cwd);
   const reference = positionals[0] || "";
@@ -1117,7 +1130,7 @@ async function handleStatus(argv) {
 }
 
 async function handleResult(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: true });
+  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
   const cwd = resolveCwd(options);
   refreshStaleJobs(cwd);
   const job = readFullJob(cwd, positionals[0] || "");
@@ -1138,7 +1151,7 @@ async function handleResult(argv) {
 }
 
 async function handleCancel(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: true });
+  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
   const cwd = resolveCwd(options);
   const job = await cancelJob(cwd, positionals[0] || "");
   output(options.json ? job : renderStoredJobResult(job), Boolean(options.json));
