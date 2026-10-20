@@ -31,6 +31,7 @@ export function parseArgs(argv, config = {}) {
     ...(config.arrayOptions ?? [])
   ]);
   const aliasMap = config.aliasMap ?? {};
+  const promptFileOption = config.promptFileOption ?? null;
   const stopAtPositional = Boolean(config.stopAtPositional);
   const options = {};
   const positionals = [];
@@ -47,12 +48,7 @@ export function parseArgs(argv, config = {}) {
     options[key].push(value);
   }
 
-  const hasPromptFile = argv.some((token) => token === "--prompt-file" || String(token).startsWith("--prompt-file="));
-
   function hasLaterPositional(startIndex) {
-    if (hasPromptFile) {
-      return true;
-    }
     for (let scan = startIndex; scan < argv.length; scan += 1) {
       const value = argv[scan];
       if (value === "--") {
@@ -61,6 +57,44 @@ export function parseArgs(argv, config = {}) {
       if (!String(value).startsWith("-") || value === "-") {
         return true;
       }
+      if (String(value).startsWith("--")) {
+        const body = String(value).slice(2);
+        const equalsIndex = body.indexOf("=");
+        const rawKey = equalsIndex === -1 ? body : body.slice(0, equalsIndex);
+        const inlineValue = equalsIndex === -1 ? undefined : body.slice(equalsIndex + 1);
+        const key = aliasMap[rawKey] ?? rawKey;
+        if (promptFileOption && key === promptFileOption && (inlineValue !== undefined || scan + 1 < argv.length)) {
+          return true;
+        }
+        if (booleanOptions.has(key)) {
+          continue;
+        }
+        if (optionalValueOptions.has(key)) {
+          if (inlineValue === undefined && scan + 1 < argv.length && !String(argv[scan + 1]).startsWith("-")) {
+            scan += 1;
+          }
+          continue;
+        }
+        if (inlineValue === undefined) {
+          scan += 1;
+        }
+        continue;
+      }
+      const rawKey = String(value).slice(1);
+      const key = aliasMap[rawKey] ?? rawKey;
+      if (promptFileOption && key === promptFileOption && scan + 1 < argv.length) {
+        return true;
+      }
+      if (booleanOptions.has(key)) {
+        continue;
+      }
+      if (optionalValueOptions.has(key)) {
+        if (scan + 1 < argv.length && !String(argv[scan + 1]).startsWith("-")) {
+          scan += 1;
+        }
+        continue;
+      }
+      scan += 1;
     }
     return false;
   }
