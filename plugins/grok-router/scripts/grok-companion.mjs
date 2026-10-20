@@ -435,10 +435,34 @@ function findPriorJobForResume(workspaceRoot, target, env = process.env) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
   return (
     jobs.find((job) => job.id === ref) ??
-    jobs.find((job) => job.grokSessionId === ref && !job.resumeOf) ??
-    jobs.find((job) => job.grokSessionId === ref) ??
+    jobs.find((job) => job.grokSessionId === ref || job.request?.controls?.resume === ref) ??
     null
   );
+}
+
+function resolveKnownSessionId(workspaceRoot, job, env = process.env) {
+  if (!job) {
+    return null;
+  }
+  if (job.grokSessionId && job.grokSessionId !== "unknown") {
+    return job.grokSessionId;
+  }
+  if (job.request?.controls?.resume && job.request.controls.resume !== "unknown") {
+    return job.request.controls.resume;
+  }
+  const seen = new Set([job.id]);
+  let cursor = job;
+  while (cursor?.resumeOf && !seen.has(cursor.resumeOf)) {
+    seen.add(cursor.resumeOf);
+    cursor = readJobFile(workspaceRoot, cursor.resumeOf, env);
+    if (cursor?.grokSessionId && cursor.grokSessionId !== "unknown") {
+      return cursor.grokSessionId;
+    }
+    if (cursor?.request?.controls?.resume && cursor.request.controls.resume !== "unknown") {
+      return cursor.request.controls.resume;
+    }
+  }
+  return null;
 }
 
 const CLI_READ_ONLY_TOOLS = new Set(["read_file", "grep", "list_dir", "web_search", "web_fetch"]);
@@ -614,11 +638,12 @@ async function handleCli(argv) {
 
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const priorJob = findPriorJobForResume(workspaceRoot, meta.resume, env);
-  const resumeSessionId = priorJob?.grokSessionId ?? (meta.resume && meta.resume !== true ? meta.resume : null);
-  if (priorJob?.grokSessionId && meta.resumeFlagIndex !== -1) {
+  const priorSessionId = resolveKnownSessionId(workspaceRoot, priorJob, env);
+  const resumeSessionId = priorSessionId ?? (meta.resume && meta.resume !== true ? meta.resume : null);
+  if (priorSessionId && meta.resumeFlagIndex !== -1) {
     args[meta.resumeFlagIndex] = meta.resumeInlinePrefix
-      ? `${meta.resumeInlinePrefix}${priorJob.grokSessionId}`
-      : priorJob.grokSessionId;
+      ? `${meta.resumeInlinePrefix}${priorSessionId}`
+      : priorSessionId;
   }
   const resumeOf = priorJob?.id ?? null;
   const userRequest = (meta.prompt ?? args.join(" ")).trim();
@@ -677,7 +702,8 @@ async function handleCli(argv) {
     const parsed = parseJsonOrNull(result.stdout?.trim?.() ? result.stdout.trim() : result.stdout);
     const exitStatus = result.error ? 1 : (result.status ?? 1);
     const jobStatus = result.timedOut ? "failed" : exitStatus === 0 ? "completed" : "failed";
-    const sessionId = jobStatus === "completed" ? extractSessionId(parsed, result.stdout) : null;
+    const parsedSessionId = extractSessionId(parsed, result.stdout);
+    const sessionId = jobStatus === "completed" ? (parsedSessionId ?? "unknown") : null;
     const text = extractGrokText(parsed, result.stdout);
     return {
       exitStatus,
@@ -761,7 +787,7 @@ async function handleRouted(mode, argv) {
 }
 
 function lastRescueSession(cwd, env) {
-  const jobs = sortJobsNewestFirst(listJobs(cwd, env)).filter((job) => job.mode === "rescue" && job.grokSessionId);
+  const jobs = sortJobsNewestFirst(listJobs(cwd, env)).filter((job) => job.mode === "rescue" && job.grokSessionId && job.grokSessionId !== "unknown");
   return jobs[0]?.grokSessionId ?? null;
 }
 
@@ -786,8 +812,9 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
   const priorJob = options.resume && options.resume !== true
     ? findPriorJobForResume(workspaceRoot, options.resume, env)
     : null;
-  if (priorJob?.grokSessionId && options.resume === priorJob.id) {
-    options.resume = priorJob.grokSessionId;
+  const priorSessionId = resolveKnownSessionId(workspaceRoot, priorJob, env);
+  if (priorSessionId && options.resume === priorJob?.id) {
+    options.resume = priorSessionId;
   }
   const models = readGrokModels(cwd, env);
   const version = readGrokVersion(cwd, env);
@@ -805,7 +832,7 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     nativeControls: nativeControls ?? [],
     diff
   });
-  const resumeOf = priorJob?.id ?? request.controls?.resume ?? null;
+  const resumeOf = priorJob?.id ?? null;
   const jobId = generateJobId(mode);
   if (mode === "review" || mode === "adversarial-review" || Boolean(options["prompt-file"])) {
     const promptFile = path.join(resolveJobsDir(workspaceRoot, env), `${jobId}.prompt.txt`);
@@ -828,7 +855,7 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     write: request.write,
     request,
     resumeOf,
-    grokSessionId: request.controls?.resume ?? null,
+    grokSessionId: null,
     contextPack,
     logFile,
     createdAt: new Date().toISOString()
@@ -853,14 +880,14 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
 
   emitJobStarted({ ...job, status: "running" });
   const finished = await runStoredJob(workspaceRoot, job.id, { env, live: !options.json });
+  if (finished.status && !["completed", "completed-with-warnings"].includes(finished.status)) {
+    process.exitCode = 1;
+  }
   if (options.json) {
     output(finished, true);
     return;
   }
   process.stdout.write(finished.rendered?.endsWith("\n") ? finished.rendered : `${finished.rendered ?? ""}\n`);
-  if (finished.status && !["completed", "completed-with-warnings"].includes(finished.status)) {
-    process.exitCode = 1;
-  }
 }
 
 async function launchLeafJob(mode, { options, prompt, lane, nativeControls, env, workspaceRoot, models, version, gitBefore, diff }) {
