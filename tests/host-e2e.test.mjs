@@ -44,7 +44,10 @@ test("exec end to end: host sees ready and the answer, not MCP startup noise", (
   assert.equal(/Grok pid/.test(result.stderr), false);
   const log = jobLogs(tempDir);
   assert.match(log, /MCP server 'fusion' handshake failed/);
-  assert.match(log, /plugin name collision/);
+  // Raw log chunks each get a timestamp. The fixture deliberately splits this
+  // message across writes, and pipe chunk boundaries vary across runtimes.
+  const logText = log.replace(/^\[[^\]\n]+\] /gm, "").replace(/\s+/g, " ");
+  assert.match(logText, /plugin name collision resolved by scope precedence/);
 });
 
 test("exec end to end: authentication failure is the startup error the host sees", () => {

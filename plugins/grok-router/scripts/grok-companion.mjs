@@ -164,7 +164,7 @@ function parseRoutedInput(argv, nativeControls) {
     ...[...ROUTER_OWNED_OPTIONS].map((option) => ({
       option,
       optionAliases: [],
-      kind: ["cwd", "model", "effort", "timeout-ms", "base", "scope", "tool", "resume"].includes(option) ? "value" : "boolean",
+      kind: ["cwd", "model", "effort", "timeout-ms", "base", "scope", "tool", "resume", "lanes"].includes(option) ? "value" : "boolean",
       repeatable: option === "tool"
     }))
   ]);

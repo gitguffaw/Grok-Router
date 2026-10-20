@@ -166,3 +166,38 @@ test("setup is ready when fake grok is logged in", () => {
   assert.ok(fs.existsSync(path.join(dest, "grok-router-review.rhai")));
   assert.ok(fs.existsSync(path.join(dest, "grok-router-adversarial-review.rhai")));
 });
+
+for (const laneArgs of [["--lanes", "ticket6,ticket8"], ["--lanes=ticket6,ticket8"]]) {
+  test(`exec ${laneArgs.join(" ")} dispatches both named lanes and preserves the prompt`, () => {
+    const tempDir = makeTempDir();
+    const result = runCompanion(["exec", ...laneArgs, "--best", "--json", "Complete the assigned acceptance work."], tempDir);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    const panel = JSON.parse(result.stdout);
+    assert.equal(panel.jobClass, "grok-panel");
+    assert.equal(panel.status, "completed");
+    assert.deepEqual(panel.lanes.map((lane) => lane.label), ["ticket6", "ticket8"]);
+    assert.equal(new Set(panel.lanes.map((lane) => lane.id)).size, 2);
+    for (const lane of panel.lanes) {
+      const leafResult = runCompanion(["result", "--json", lane.id], tempDir);
+      assert.equal(leafResult.status, 0, leafResult.stderr);
+      const leaf = JSON.parse(leafResult.stdout);
+      assert.equal(leaf.status, "completed");
+      assert.equal(leaf.request.userRequest, "Complete the assigned acceptance work.");
+      assert.ok(leaf.request.prompt.includes(`Lane: ${lane.label}.`));
+      assert.equal(leaf.request.noSubagents, true);
+      assert.equal(leaf.request.controls.model, "grok-4.6");
+    }
+  });
+}
+
+for (const resumeFlag of ["--resume", "-r"]) {
+  test(`exec ${resumeFlag} forwards a named session exactly once`, () => {
+    const tempDir = makeTempDir();
+    const session = "11111111-1111-4111-8111-111111111111";
+    const result = runCompanion(["exec", resumeFlag, session, "Continue the requested fix."], tempDir);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    const { argv } = readArgv(tempDir);
+    assert.equal(argv.filter((arg) => arg === "--resume").length, 1);
+    assert.equal(argv[argv.indexOf("--resume") + 1], session);
+  });
+}

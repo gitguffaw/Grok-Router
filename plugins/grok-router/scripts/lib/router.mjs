@@ -139,7 +139,11 @@ export function buildRouterRequest({
   }
   const effort = options.effort ?? options["reasoning-effort"] ?? null;
   const tools = write ? null : toolsFor(mode, options);
-  const nativeArgs = nativeArgsFromParsedOptions(options, nativeControls);
+  const resume = options.resume && options.resume !== true ? options.resume : null;
+  // A named resume is emitted by buildGrokPrintArgs through controls.
+  // Keep a bare --resume on the native path for the CLI session picker.
+  const nativeArgs = nativeArgsFromParsedOptions(options,
+    nativeControls.filter((control) => control.option !== "resume" || !resume));
   const diffPreamble = diff?.text
     ? `\nSelected diff (\`${diff.command}\`):\n\n${diff.text}\n`
     : "";
@@ -163,7 +167,7 @@ export function buildRouterRequest({
       model,
       effort,
       timeoutMs: options["timeout-ms"],
-      resume: options.resume && options.resume !== true ? options.resume : null,
+      resume,
       continue: Boolean(options.continue && !options.resume)
     },
     nativeArgs,
