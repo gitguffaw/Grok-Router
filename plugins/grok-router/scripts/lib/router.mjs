@@ -158,15 +158,14 @@ export function buildRouterRequest({
     ? options.write !== false && options.write !== "false"
     : Boolean(config.write);
 
-  const modelSelector = options.model ?? options.m ?? null;
   let model = null;
-  if (options.best || modelSelector) {
+  if (options.best || options.model) {
     if (!catalog) {
       throw new Error("Model catalog is required to resolve --model / --best.");
     }
-    model = resolveModelSelector(catalog, modelSelector, { best: Boolean(options.best) });
+    model = resolveModelSelector(catalog, options.model, { best: Boolean(options.best) });
   }
-  const effort = options.effort ?? options["reasoning-effort"] ?? options.reasoning_effort ?? null;
+  const effort = options.effort ?? options["reasoning-effort"] ?? null;
   const tools = write ? null : toolsFor(mode, options);
   const resume = options.resume && options.resume !== true ? options.resume : null;
   // Managed controls (model, effort, continue, and named resume) are emitted
