@@ -104,14 +104,15 @@ test("policy flags are not auto-forwarded from user options", () => {
 });
 
 test("managed model and effort selectors are emitted once in buildGrokPrintArgs while unrelated native flags forward", () => {
-  for (const options of [
-    { model: "4.6", effort: "xhigh", verbatim: true },
-    { m: "4.6", "reasoning-effort": "high", verbatim: true }
+  for (const rawArgs of [
+    ["--model", "4.6", "--effort", "xhigh", "--verbatim", "Reply only pong."],
+    ["-m", "4.6", "--reasoning-effort", "high", "--verbatim", "Reply only pong."]
   ]) {
+    const parsed = parseRoutedInput(rawArgs, nativeControls);
     const request = buildRouterRequest({
       mode: "exec",
-      prompt: "Reply only pong. Do not use tools or modify files.",
-      options,
+      prompt: parsed.positionals.join(" "),
+      options: parsed.options,
       catalog,
       nativeControls
     });
@@ -234,3 +235,21 @@ test("buildRouterRequest gives a clear error when --prompt-file does not exist",
   );
 });
 
+test("managed --continue and -c are emitted once in buildGrokPrintArgs", () => {
+  for (const flag of ["--continue", "-c"]) {
+    const parsed = parseRoutedInput([flag, "Continue the current session."], nativeControls);
+    const request = buildRouterRequest({
+      mode: "exec",
+      prompt: parsed.positionals.join(" "),
+      options: parsed.options,
+      catalog,
+      nativeControls
+    });
+    const args = buildGrokPrintArgs(request);
+    assert.equal(
+      args.filter((arg) => arg === "--continue" || arg === "-c").length,
+      1,
+      `expected one continue flag in ${JSON.stringify(args)}`
+    );
+  }
+});

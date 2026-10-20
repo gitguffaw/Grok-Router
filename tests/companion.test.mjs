@@ -416,3 +416,82 @@ test("--prompt-file stores file contents in cli and reports a clear error when m
   }
 });
 
+test("cli only tracks prompt or resume runs, does not impose a 30m default timeout, marks editing tools as write:true, parses -p and --continue cleanly, and rejects router-only flags", () => {
+  const tempDir = makeTempDir();
+
+  // Finding 1: non-prompt subcommands (`cli --help`, `cli models`, `cli clone --help`) are not tracked as jobs
+  const helpRun = runCompanion(["cli", "--help"], tempDir);
+  assert.equal(helpRun.status, 0, helpRun.stderr);
+  assert.equal(/Job ID:/.test(helpRun.stderr), false);
+
+  const modelsRun = runCompanion(["cli", "models"], tempDir);
+  assert.equal(modelsRun.status, 0, modelsRun.stderr);
+  assert.equal(/Job ID:/.test(modelsRun.stderr), false);
+
+  const cloneHelpRun = runCompanion(["cli", "clone", "--help"], tempDir);
+  assert.equal(cloneHelpRun.status, 0, cloneHelpRun.stderr);
+  assert.equal(/Job ID:/.test(cloneHelpRun.stderr), false);
+
+  const statusAfterDiscovery = runCompanion(["status", "--all", "--json"], tempDir);
+  assert.equal(statusAfterDiscovery.status, 0, statusAfterDiscovery.stderr);
+  assert.equal(JSON.parse(statusAfterDiscovery.stdout).jobs.length, 0);
+
+  // Finding 6 & 3 & 2: positional prompt has no trailing flags attached, editing tools set write:true, and timeoutMs is null by default
+  const editRun = runCompanion(
+    ["cli", "--raw-arg-string", '-p "Hello" --tools read_file,edit_file --output-format json'],
+    tempDir
+  );
+  assert.equal(editRun.status, 0, editRun.stderr + editRun.stdout);
+  const editJobId = editRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(editJobId);
+  const editJob = JSON.parse(runCompanion(["result", "--json", editJobId], tempDir).stdout);
+  assert.equal(editJob.request.prompt, "Hello");
+  assert.equal(editJob.request.userRequest, "Hello");
+  assert.equal(editJob.title, "Hello");
+  assert.equal(editJob.write, true);
+  assert.equal(editJob.request.write, true);
+  assert.equal(editJob.request.controls.timeoutMs, null);
+
+  const positionalPromptWithTrailingFlags = runCompanion(
+    ["cli", "-r", "11111111-1111-4111-8111-111111111111", "Hello", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(positionalPromptWithTrailingFlags.status, 0, positionalPromptWithTrailingFlags.stderr + positionalPromptWithTrailingFlags.stdout);
+  const posPromptId = positionalPromptWithTrailingFlags.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(posPromptId);
+  const posPromptJob = JSON.parse(runCompanion(["result", "--json", posPromptId], tempDir).stdout);
+  assert.equal(posPromptJob.request.prompt, "Hello");
+  assert.equal(posPromptJob.request.userRequest, "Hello");
+
+  // Read-only tools stay write:false
+  const readOnlyRun = runCompanion(
+    ["cli", "-p", "Check status", "--tools", "read_file,grep,list_dir", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(readOnlyRun.status, 0, readOnlyRun.stderr + readOnlyRun.stdout);
+  const readOnlyJobId = readOnlyRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(readOnlyJobId);
+  const readOnlyJob = JSON.parse(runCompanion(["result", "--json", readOnlyJobId], tempDir).stdout);
+  assert.equal(readOnlyJob.write, false);
+  assert.equal(readOnlyJob.request.write, false);
+
+  // Finding 6: `-p --continue` does not become both prompt "--continue" and continue:true
+  const literalContinuePrompt = runCompanion(
+    ["cli", "-p", "--continue", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(literalContinuePrompt.status, 0, literalContinuePrompt.stderr + literalContinuePrompt.stdout);
+  const literalContinueId = literalContinuePrompt.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(literalContinueId);
+  const literalContinueJob = JSON.parse(runCompanion(["result", "--json", literalContinueId], tempDir).stdout);
+  assert.equal(literalContinueJob.request.prompt, "--continue");
+  assert.equal(literalContinueJob.request.controls.continue, false);
+
+  // Finding 11: router-only flags on cli are rejected clearly instead of silently forwarded to grok
+  for (const routerFlag of ["--json", "--background", "--lean", "--best"]) {
+    const badCli = runCompanion(["cli", routerFlag, "-p", "Hello"], tempDir);
+    assert.notEqual(badCli.status, 0, `expected cli ${routerFlag} to fail`);
+    assert.match(badCli.stderr, new RegExp(routerFlag));
+  }
+});
+
