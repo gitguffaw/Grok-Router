@@ -635,3 +635,20 @@ test("cli -r <jobId> and managed --resume <jobId> fail clearly when the referenc
   assert.notEqual(managedResumeUnknown.status, 0);
   assert.match(managedResumeUnknown.stderr, new RegExp(`job ${jobId} has no known Grok session`, "i"));
 });
+
+test("cli rejects router-only flags only in option position, never as flag values or after --", () => {
+  const tempDir = makeTempDir();
+
+  const promptIsRouterFlag = runCompanion(["cli", "-p", "--best", "--output-format", "json"], tempDir);
+  assert.equal(promptIsRouterFlag.status, 0, promptIsRouterFlag.stderr + promptIsRouterFlag.stdout);
+  const { argv: argv1 } = readArgv(tempDir);
+  assert.equal(argv1[argv1.indexOf("-p") + 1], "--best");
+
+  const rulesIsRouterFlag = runCompanion(["cli", "--rules", "--json", "-p", "Hello", "--output-format", "json"], tempDir);
+  assert.equal(rulesIsRouterFlag.status, 0, rulesIsRouterFlag.stderr + rulesIsRouterFlag.stdout);
+  const { argv: argv2 } = readArgv(tempDir);
+  assert.equal(argv2[argv2.indexOf("--rules") + 1], "--json");
+
+  const afterDoubleDash = runCompanion(["cli", "-p", "Hello", "--output-format", "json", "--", "--lean"], tempDir);
+  assert.equal(afterDoubleDash.status, 0, afterDoubleDash.stderr + afterDoubleDash.stdout);
+});
