@@ -156,6 +156,9 @@ export function renderJobStatus(job) {
   if (job.grokSessionId) {
     lines.push(`Grok session: ${job.grokSessionId}`);
   }
+  if (job.resumeOf) {
+    lines.push(`Resume of: ${job.resumeOf}`);
+  }
   if (job.logFile) {
     lines.push("", "Log preview:");
     for (const line of readLogPreview(job.logFile)) {
@@ -184,6 +187,9 @@ export function renderStoredJobResult(job) {
   }
   if (job.grokSessionId) {
     lines.push(`Resume in Grok: grok --resume ${job.grokSessionId}`);
+  }
+  if (job.resumeOf) {
+    lines.push(`Resume of: ${job.resumeOf}`);
   }
   lines.push("", job.rendered || JSON.stringify(job.result ?? {}, null, 2));
   return `${lines.join("\n").trimEnd()}\n`;
