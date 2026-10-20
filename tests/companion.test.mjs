@@ -693,3 +693,47 @@ test("cli write classification detects --yolo/--always-approve only as options a
   assert.equal(realYoloJob.write, true);
   assert.equal(realYoloJob.request.write, true);
 });
+
+test("--continue and -c turns link into the resumeOf chain using the most recent prior tracked job in the same cwd or null if none", () => {
+  const tempDir = makeTempDir();
+
+  const turn1 = runCompanion(
+    ["cli", "--continue", "-p", "First turn with continue", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(turn1.status, 0, turn1.stderr + turn1.stdout);
+  const turn1Id = turn1.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(turn1Id);
+  const turn1Job = JSON.parse(runCompanion(["result", "--json", turn1Id], tempDir).stdout);
+  assert.equal(turn1Job.resumeOf, null);
+
+  const turn2 = runCompanion(
+    ["analyze", "--continue", "--json", "Second turn via managed continue"],
+    tempDir
+  );
+  assert.equal(turn2.status, 0, turn2.stderr + turn2.stdout);
+  const turn2Job = JSON.parse(turn2.stdout);
+  assert.equal(turn2Job.resumeOf, turn1Id);
+
+  const turn3 = runCompanion(
+    ["cli", "-c", "-p", "Third turn via cli -c", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(turn3.status, 0, turn3.stderr + turn3.stdout);
+  const turn3Id = turn3.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(turn3Id);
+  const turn3Job = JSON.parse(runCompanion(["result", "--json", turn3Id], tempDir).stdout);
+  assert.equal(turn3Job.resumeOf, turn2Job.id);
+
+  const otherCwd = path.join(tempDir, "sub-cwd");
+  fs.mkdirSync(otherCwd, { recursive: true });
+  const otherCwdTurn = runCompanion(
+    ["cli", "--cwd", otherCwd, "--continue", "-p", "Turn in different cwd", "--output-format", "json"],
+    tempDir
+  );
+  assert.equal(otherCwdTurn.status, 0, otherCwdTurn.stderr + otherCwdTurn.stdout);
+  const otherCwdId = otherCwdTurn.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(otherCwdId);
+  const otherCwdJob = JSON.parse(runCompanion(["result", "--json", otherCwdId, "--cwd", otherCwd], tempDir).stdout);
+  assert.equal(otherCwdJob.resumeOf, null);
+});
