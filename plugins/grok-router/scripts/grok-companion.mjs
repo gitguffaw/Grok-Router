@@ -14,6 +14,8 @@ import {
   grokHome,
   grokInvocation,
   managedTimeoutMs,
+  READ_ONLY_TOOLS,
+  READ_ONLY_WEB_TOOLS,
   readGrokHelp,
   readGrokInspect,
   readGrokModels,
@@ -518,17 +520,25 @@ function resolveKnownSessionId(workspaceRoot, job, env = process.env) {
   return null;
 }
 
-const CLI_READ_ONLY_TOOLS = new Set(["read_file", "grep", "list_dir", "web_search", "web_fetch"]);
+const READ_ONLY_TOOL_NAMES = new Set(
+  `${READ_ONLY_TOOLS},${READ_ONLY_WEB_TOOLS}`
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+);
 
-function cliToolsCanWrite(tools) {
-  if (!tools) {
-    return false;
+function classifyCliToolsWrite(tools) {
+  if (tools === null || tools === undefined) {
+    return "unknown";
   }
   const entries = String(tools)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
-  return entries.some((entry) => !CLI_READ_ONLY_TOOLS.has(entry));
+  if (!entries.length) {
+    return false;
+  }
+  return entries.some((entry) => !READ_ONLY_TOOL_NAMES.has(entry));
 }
 
 function extractCliMetadata(args, cwd, helpText = "") {
@@ -551,6 +561,7 @@ function extractCliMetadata(args, cwd, helpText = "") {
   let resumeInlinePrefix = null;
   let hasResumeFlag = false;
   let hasContinueFlag = false;
+  let hasAutoApproveFlag = false;
   let prompt = null;
   let promptFile = null;
   let model = null;
@@ -581,6 +592,8 @@ function extractCliMetadata(args, cwd, helpText = "") {
       resumeInlinePrefix = "--resume=";
     } else if (token === "--continue" || token === "-c") {
       hasContinueFlag = true;
+    } else if (token === "--always-approve" || token === "--yolo") {
+      hasAutoApproveFlag = true;
     } else if ((token === "-p" || token === "--single") && next !== undefined) {
       prompt = String(next);
       i += 1;
@@ -649,6 +662,7 @@ function extractCliMetadata(args, cwd, helpText = "") {
     model,
     effort,
     tools,
+    hasAutoApproveFlag,
     continue: hasContinueFlag
   };
 }
@@ -706,7 +720,9 @@ async function handleCli(argv) {
   }
   const resumeOf = priorJob?.id ?? null;
   const userRequest = (meta.prompt ?? args.join(" ")).trim();
-  const write = args.includes("--always-approve") || args.includes("--yolo") || cliToolsCanWrite(meta.tools) || Boolean(classification.mutating);
+  const write = (meta.hasAutoApproveFlag || Boolean(classification.mutating))
+    ? true
+    : classifyCliToolsWrite(meta.tools);
   const jobId = generateJobId("cli");
   const logFile = createJobLogFile(workspaceRoot, jobId, "Grok CLI", env);
   const request = {
