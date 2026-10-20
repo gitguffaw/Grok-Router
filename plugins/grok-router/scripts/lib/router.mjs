@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { nativeArgsFromParsedOptions } from "./live-controls.mjs";
 import { READ_ONLY_TOOLS, READ_ONLY_WEB_TOOLS } from "./grok.mjs";
 import { applyLeanToRequest, resolveLean, REVIEW_JSON_SCHEMA } from "./lean.mjs";
@@ -11,7 +13,22 @@ const MODE_CONFIG = {
   rescue: { workflow: "Rescue", write: null }
 };
 
-const MANAGED_CONTROL_OPTIONS = new Set(["model", "reasoning-effort", "effort", "continue"]);
+const MANAGED_CONTROL_OPTIONS = new Set(["model", "reasoning-effort", "effort", "continue", "prompt-file"]);
+
+function resolvePromptText(prompt, options = {}) {
+  const inline = String(prompt ?? "").trim();
+  const promptFile = options["prompt-file"] ?? options.prompt_file ?? options.promptFile ?? null;
+  if (!promptFile || promptFile === true) {
+    return inline;
+  }
+  const baseDir = options.cwd ? path.resolve(process.cwd(), String(options.cwd)) : process.cwd();
+  const resolvedPath = path.resolve(baseDir, String(promptFile));
+  const fromFile = fs.readFileSync(resolvedPath, "utf8").trim();
+  if (inline && fromFile) {
+    return `${fromFile}\n\n${inline}`;
+  }
+  return fromFile || inline;
+}
 
 function requirePrompt(prompt, { allowEmpty = false } = {}) {
   if (!allowEmpty && !String(prompt ?? "").trim()) {
@@ -116,10 +133,11 @@ export function buildRouterRequest({
     throw new Error(`Unsupported Grok Router mode "${mode}".`);
   }
   rejectWait(options);
-  if (mode === "review" && String(prompt ?? "").trim()) {
+  const resolvedPrompt = resolvePromptText(prompt, options);
+  if (mode === "review" && resolvedPrompt) {
     throw new Error("Focus text is not accepted on review. Use adversarial-review for steered review.");
   }
-  const effectivePrompt = String(prompt ?? "").trim()
+  const effectivePrompt = resolvedPrompt
     || (config.review ? "Review the current uncommitted changes." : "");
   requirePrompt(effectivePrompt, { allowEmpty: false });
 

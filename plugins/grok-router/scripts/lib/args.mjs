@@ -47,7 +47,12 @@ export function parseArgs(argv, config = {}) {
     options[key].push(value);
   }
 
+  const hasPromptFile = argv.some((token) => token === "--prompt-file" || String(token).startsWith("--prompt-file="));
+
   function hasLaterPositional(startIndex) {
+    if (hasPromptFile) {
+      return true;
+    }
     for (let scan = startIndex; scan < argv.length; scan += 1) {
       const value = argv[scan];
       if (value === "--") {

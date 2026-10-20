@@ -503,7 +503,7 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     diff
   });
   const jobId = generateJobId(mode);
-  if (mode === "review" || mode === "adversarial-review") {
+  if (mode === "review" || mode === "adversarial-review" || Boolean(options["prompt-file"])) {
     const promptFile = path.join(resolveJobsDir(workspaceRoot, env), `${jobId}.prompt.txt`);
     fs.mkdirSync(path.dirname(promptFile), { recursive: true, mode: 0o700 });
     fs.writeFileSync(promptFile, request.prompt, { encoding: "utf8", mode: 0o600 });
@@ -568,7 +568,7 @@ async function launchLeafJob(mode, { options, prompt, lane, nativeControls, env,
     diff
   });
   const jobId = generateJobId(`${mode}-lane`);
-  if (mode === "review" || mode === "adversarial-review") {
+  if (mode === "review" || mode === "adversarial-review" || Boolean(options["prompt-file"])) {
     const promptFile = path.join(resolveJobsDir(workspaceRoot, env), `${jobId}.prompt.txt`);
     fs.mkdirSync(path.dirname(promptFile), { recursive: true, mode: 0o700 });
     fs.writeFileSync(promptFile, request.prompt, { encoding: "utf8", mode: 0o600 });
