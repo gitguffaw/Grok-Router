@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildGrokPrintArgs } from "../plugins/grok-router/scripts/lib/grok.mjs";
 import { classifyControls } from "../plugins/grok-router/scripts/lib/live-controls.mjs";
 import { parseGrokModels } from "../plugins/grok-router/scripts/lib/models.mjs";
 import { buildRouterRequest } from "../plugins/grok-router/scripts/lib/router.mjs";
@@ -97,3 +98,29 @@ test("policy flags are not auto-forwarded from user options", () => {
   assert.ok(!request.nativeArgs.includes("--sandbox"));
   assert.equal(request.tools, "read_file,grep,list_dir");
 });
+
+test("managed model and effort selectors are emitted once in buildGrokPrintArgs while unrelated native flags forward", () => {
+  for (const options of [
+    { model: "4.6", effort: "xhigh", verbatim: true },
+    { m: "4.6", "reasoning-effort": "high", verbatim: true }
+  ]) {
+    const request = buildRouterRequest({
+      mode: "exec",
+      prompt: "Reply only pong. Do not use tools or modify files.",
+      options,
+      catalog,
+      nativeControls
+    });
+    const args = buildGrokPrintArgs(request);
+    assert.equal(args.filter((arg) => arg === "-m" || arg === "--model").length, 1, `expected one model flag in ${JSON.stringify(args)}`);
+    assert.equal(args[args.indexOf("-m") + 1], "grok-4.6");
+    assert.ok(!args.includes("--model"));
+    assert.equal(
+      args.filter((arg) => arg === "--reasoning-effort" || arg === "--effort").length,
+      1,
+      `expected one effort flag in ${JSON.stringify(args)}`
+    );
+    assert.ok(args.includes("--verbatim"));
+  }
+});
+
