@@ -154,7 +154,7 @@ export function renderJobStatus(job) {
     lines.push(`Context pack: ${job.contextPack.id}`);
   }
   if (job.grokSessionId) {
-    lines.push(`Grok session: ${job.grokSessionId}`);
+    lines.push(`Grok session: ${job.grokSessionId === "unknown" ? "not reported" : job.grokSessionId}`);
   }
   if (job.resumeOf) {
     lines.push(`Resume of: ${job.resumeOf}`);
