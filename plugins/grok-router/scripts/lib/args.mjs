@@ -241,3 +241,16 @@ export function splitRawArgumentString(raw) {
   }
   return tokens;
 }
+
+export function normalizeArgv(argv) {
+  if (argv[0] === "--raw-arg-string") {
+    if (argv.length !== 2) {
+      throw new Error("--raw-arg-string requires exactly one following token: the raw argument string");
+    }
+    return splitRawArgumentString(argv[1]);
+  }
+  if (argv.length === 1 && argv[0] && argv[0].includes(" ") && !argv[0].startsWith("-")) {
+    return splitRawArgumentString(argv[0]);
+  }
+  return argv;
+}

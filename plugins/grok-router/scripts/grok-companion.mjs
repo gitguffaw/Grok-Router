@@ -4,18 +4,20 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { hasLeadingHelpFlag, parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { hasLeadingHelpFlag, normalizeArgv, parseArgs } from "./lib/args.mjs";
+import {
+  classifyCliArgs,
+  findPriorJobForContinue,
+  findPriorJobForResume,
+  handleCli,
+  resolveKnownSessionId
+} from "./lib/cli.mjs";
 import { createContextPack } from "./lib/context-pack.mjs";
 import {
-  extractGrokText,
-  extractSessionId,
   getGrokAuthStatus,
   getGrokAvailability,
   grokHome,
   grokInvocation,
-  managedTimeoutMs,
-  READ_ONLY_TOOLS,
-  READ_ONLY_WEB_TOOLS,
   readGrokHelp,
   readGrokInspect,
   readGrokModels,
@@ -24,7 +26,6 @@ import {
   summarizeInspect
 } from "./lib/grok.mjs";
 import { classifyControls, coverageForSurface, liveControlParseConfig, ROUTER_OWNED_OPTIONS } from "./lib/live-controls.mjs";
-import { parseGrokHelp } from "./lib/help.mjs";
 import {
   appendLogLine,
   cancelJob,
@@ -37,7 +38,7 @@ import {
   waitForJob
 } from "./lib/jobs.mjs";
 import { renderModelCatalog } from "./lib/models.mjs";
-import { binaryAvailable, runCommand, runProcess, spawnDetached } from "./lib/process.mjs";
+import { binaryAvailable, runCommand, spawnDetached } from "./lib/process.mjs";
 import {
   emitJobStarted,
   emitLiveProgress,
@@ -52,7 +53,7 @@ import {
 import { mergeLaneFindings, parseLanes, renderSynthesis } from "./lib/panel.mjs";
 import { buildRouterRequest } from "./lib/router.mjs";
 import { generateJobId, getConfig, readJobFile, resolveJobsDir, saveJob, setConfig } from "./lib/state.mjs";
-import { readGitDiff, readGitStatus, resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { readGitDiff, readGitStatus, resolveCwd, resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -106,19 +107,6 @@ function pluginVersion() {
   return PLUGIN_VERSION;
 }
 
-function normalizeArgv(argv) {
-  if (argv[0] === "--raw-arg-string") {
-    if (argv.length !== 2) {
-      throw new Error("--raw-arg-string requires exactly one following token: the raw argument string");
-    }
-    return splitRawArgumentString(argv[1]);
-  }
-  if (argv.length === 1 && argv[0] && argv[0].includes(" ") && !argv[0].startsWith("-")) {
-    return splitRawArgumentString(argv[0]);
-  }
-  return argv;
-}
-
 function parseCommandInput(argv, config = {}) {
   return parseArgs(normalizeArgv(argv), {
     ...ROUTER_PARSE_SEED,
@@ -133,10 +121,6 @@ function parseCommandInput(argv, config = {}) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
-}
-
-function resolveCwd(options) {
-  return options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
 }
 
 function output(value, asJson) {
@@ -366,461 +350,6 @@ async function handleHelp(argv) {
   const result = runCommand(invocation.command, invocation.args, { cwd });
   const payload = commandPayload(result);
   output(parsed.options.json ? payload : renderCommandPayload(`grok ${args.join(" ")}`, payload), Boolean(parsed.options.json));
-}
-
-function classifyCliArgs(args, helpText) {
-  const parsed = parseGrokHelp(helpText);
-  const commandNames = new Set(parsed.commands.flatMap((command) => [command.name, ...command.aliases]));
-  const [first] = args;
-  const helpOnly = args.includes("--help") || args.includes("-h") || first === "help";
-  const mutatingCommands = new Set(["login", "logout", "plugin", "mcp", "setup", "update", "memory", "worktree", "clone"]);
-  const mutating = !helpOnly && mutatingCommands.has(first);
-  const unclassified = !helpOnly && first && !commandNames.has(first) && !String(first).startsWith("-");
-  return { helpOnly, mutating, unclassified, first };
-}
-
-const CLI_ALLOWED_ROUTER_OPTIONS = new Set(["cwd", "timeout-ms", "allow-mutating", "allow-dangerous"]);
-const CLI_REJECTED_ROUTER_OPTIONS = new Set([
-  "base",
-  "scope",
-  "tool",
-  "lanes",
-  "lane",
-  "json",
-  "background",
-  "wait",
-  "best",
-  "lean",
-  "full",
-  "search",
-  "docs",
-  "parallel",
-  "panel",
-  "all",
-  "write",
-  "fresh",
-  "resume-last",
-  "enable-review-gate",
-  "disable-review-gate"
-]);
-const CLI_KNOWN_VALUE_FLAGS = new Set(["--agent", "--agents", "--allow", "--allowedTools", "--cwd", "-C", "--debug-file", "--deny", "--disallowed-tools", "--disallowedTools", "--json-schema", "--leader-socket", "-m", "--model", "--max-turns", "--output-format", "-p", "--single", "--permission-mode", "--prompt-file", "--prompt-json", "--reasoning-effort", "--effort", "--rules", "-s", "--session-id", "--sandbox", "--system-prompt-override", "--system-prompt", "--tools", "--worktree-ref", "--ref"]);
-const CLI_KNOWN_OPTIONAL_VALUE_FLAGS = new Set(["-r", "--resume", "-w", "--worktree"]);
-
-function parseCliInput(argv) {
-  const tokens = normalizeArgv(argv);
-  const options = {};
-  const positionals = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = String(tokens[i] ?? "");
-    const next = tokens[i + 1];
-    if (token === "--") {
-      positionals.push("--", ...tokens.slice(i + 1));
-      break;
-    }
-    if (token === "--cwd" || token === "-C") {
-      if (next === undefined) {
-        throw new Error(`Missing value for ${token}`);
-      }
-      options.cwd = next;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--cwd=")) {
-      options.cwd = token.slice("--cwd=".length);
-      continue;
-    }
-    if (token === "--timeout-ms") {
-      if (next === undefined) {
-        throw new Error("Missing value for --timeout-ms");
-      }
-      options["timeout-ms"] = next;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith("--timeout-ms=")) {
-      options["timeout-ms"] = token.slice("--timeout-ms=".length);
-      continue;
-    }
-    if (token === "--allow-mutating" || token === "--allow-dangerous") {
-      options[token.slice(2)] = true;
-      continue;
-    }
-    if (token.startsWith("--allow-mutating=") || token.startsWith("--allow-dangerous=")) {
-      const [rawKey, val] = token.slice(2).split("=", 2);
-      options[rawKey] = val !== "false";
-      continue;
-    }
-    if (token.startsWith("--")) {
-      const eq = token.indexOf("=");
-      const key = eq === -1 ? token.slice(2) : token.slice(2, eq);
-      if (CLI_REJECTED_ROUTER_OPTIONS.has(key) && CLI_ALLOWED_ROUTER_OPTIONS.has(key) === false) {
-        throw new Error(`--${key} is a router option and is not supported on cli. Pass native grok flags (or use analyze, exec, review, adversarial-review, or rescue).`);
-      }
-    }
-    positionals.push(token);
-    if (token.startsWith("-") && !token.includes("=")) {
-      if (CLI_KNOWN_VALUE_FLAGS.has(token) && next !== undefined) {
-        positionals.push(next);
-        i += 1;
-      } else if (CLI_KNOWN_OPTIONAL_VALUE_FLAGS.has(token) && next !== undefined && !String(next).startsWith("-")) {
-        positionals.push(next);
-        i += 1;
-      }
-    }
-  }
-  return { options, positionals };
-}
-
-function parseJsonOrNull(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function findPriorJobForResume(workspaceRoot, target, env = process.env) {
-  if (!target || target === true) {
-    return null;
-  }
-  const ref = String(target).trim();
-  if (!ref) {
-    return null;
-  }
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
-  return (
-    jobs.find((job) => job.id === ref) ??
-    jobs.find((job) => job.grokSessionId === ref) ??
-    null
-  );
-}
-
-function findPriorJobForContinue(workspaceRoot, cwd, env = process.env) {
-  const normalizedCwd = path.resolve(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
-  return (
-    jobs.find((job) => job.jobClass !== "grok-panel" && path.resolve(job.cwd ?? job.workspaceRoot ?? workspaceRoot) === normalizedCwd) ??
-    null
-  );
-}
-
-function resolveKnownSessionId(workspaceRoot, job, env = process.env) {
-  if (!job) {
-    return null;
-  }
-  if (job.grokSessionId && job.grokSessionId !== "unknown") {
-    return job.grokSessionId;
-  }
-  if (job.request?.controls?.resume && job.request.controls.resume !== "unknown") {
-    return job.request.controls.resume;
-  }
-  const seen = new Set([job.id]);
-  let cursor = job;
-  while (cursor?.resumeOf && !seen.has(cursor.resumeOf)) {
-    seen.add(cursor.resumeOf);
-    cursor = readJobFile(workspaceRoot, cursor.resumeOf, env);
-    if (cursor?.grokSessionId && cursor.grokSessionId !== "unknown") {
-      return cursor.grokSessionId;
-    }
-    if (cursor?.request?.controls?.resume && cursor.request.controls.resume !== "unknown") {
-      return cursor.request.controls.resume;
-    }
-  }
-  return null;
-}
-
-const READ_ONLY_TOOL_NAMES = new Set(
-  `${READ_ONLY_TOOLS},${READ_ONLY_WEB_TOOLS}`
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-);
-
-function classifyCliToolsWrite(tools) {
-  if (tools === null || tools === undefined) {
-    return "unknown";
-  }
-  const entries = String(tools)
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (!entries.length) {
-    return false;
-  }
-  return entries.some((entry) => !READ_ONLY_TOOL_NAMES.has(entry));
-}
-
-function extractCliMetadata(args, cwd, helpText = "") {
-  const parsedHelp = parseGrokHelp(helpText);
-  const commandNames = new Set(parsedHelp.commands.flatMap((command) => [command.name, ...command.aliases]));
-  const valueFlags = new Set(["--agent", "--agents", "--allow", "--allowedTools", "--cwd", "-C", "--debug-file", "--deny", "--disallowed-tools", "--disallowedTools", "--json-schema", "--leader-socket", "-m", "--model", "--max-turns", "--output-format", "-p", "--single", "--permission-mode", "--prompt-file", "--prompt-json", "--reasoning-effort", "--effort", "--rules", "-s", "--session-id", "--sandbox", "--system-prompt-override", "--system-prompt", "--tools", "--worktree-ref", "--ref"]);
-  const optionalValueFlags = new Set(["-r", "--resume", "-w", "--worktree"]);
-  for (const flag of parsedHelp.flags) {
-    for (const name of flag.names) {
-      if (flag.requiresValue) {
-        valueFlags.add(name);
-      } else if (flag.optionalValue) {
-        optionalValueFlags.add(name);
-      }
-    }
-  }
-
-  let resume = null;
-  let resumeFlagIndex = -1;
-  let resumeInlinePrefix = null;
-  let hasResumeFlag = false;
-  let hasContinueFlag = false;
-  let hasAutoApproveFlag = false;
-  let prompt = null;
-  let promptFile = null;
-  let model = null;
-  let effort = null;
-  let tools = null;
-  const positionalTokens = [];
-
-  for (let i = 0; i < args.length; i += 1) {
-    const token = String(args[i] ?? "");
-    const next = args[i + 1];
-    if (token === "--") {
-      positionalTokens.push(...args.slice(i + 1).map((item) => String(item)));
-      break;
-    }
-    if ((token === "--resume" || token === "-r")) {
-      hasResumeFlag = true;
-      if (next !== undefined && !String(next).startsWith("-")) {
-        resume = String(next);
-        resumeFlagIndex = i + 1;
-        i += 1;
-      } else {
-        resume = true;
-      }
-    } else if (token.startsWith("--resume=")) {
-      hasResumeFlag = true;
-      resume = token.slice("--resume=".length);
-      resumeFlagIndex = i;
-      resumeInlinePrefix = "--resume=";
-    } else if (token === "--continue" || token === "-c") {
-      hasContinueFlag = true;
-    } else if (token === "--always-approve" || token === "--yolo") {
-      hasAutoApproveFlag = true;
-    } else if ((token === "-p" || token === "--single") && next !== undefined) {
-      prompt = String(next);
-      i += 1;
-    } else if (token.startsWith("--single=")) {
-      prompt = token.slice("--single=".length);
-    } else if (token === "--prompt-file" && next !== undefined) {
-      promptFile = String(next);
-      i += 1;
-    } else if (token.startsWith("--prompt-file=")) {
-      promptFile = token.slice("--prompt-file=".length);
-    } else if ((token === "-m" || token === "--model") && next !== undefined) {
-      model = String(next);
-      i += 1;
-    } else if (token.startsWith("--model=")) {
-      model = token.slice("--model=".length);
-    } else if ((token === "--effort" || token === "--reasoning-effort") && next !== undefined) {
-      effort = String(next);
-      i += 1;
-    } else if (token.startsWith("--effort=")) {
-      effort = token.slice("--effort=".length);
-    } else if (token.startsWith("--reasoning-effort=")) {
-      effort = token.slice("--reasoning-effort=".length);
-    } else if (token === "--tools" && next !== undefined) {
-      tools = String(next);
-      i += 1;
-    } else if (token.startsWith("--tools=")) {
-      tools = token.slice("--tools=".length);
-    } else if (token.startsWith("-")) {
-      const eq = token.indexOf("=");
-      if (eq === -1) {
-        if (valueFlags.has(token) && next !== undefined) {
-          i += 1;
-        } else if (optionalValueFlags.has(token) && next !== undefined && !String(next).startsWith("-")) {
-          i += 1;
-        }
-      }
-    } else {
-      positionalTokens.push(token);
-    }
-  }
-
-  let resolvedPromptFile = null;
-  if (promptFile) {
-    resolvedPromptFile = path.resolve(cwd, promptFile);
-    if (!fs.existsSync(resolvedPromptFile)) {
-      throw new Error(`Prompt file not found: ${resolvedPromptFile}`);
-    }
-    const fromFile = fs.readFileSync(resolvedPromptFile, "utf8").trim() || `[prompt-file: ${resolvedPromptFile}]`;
-    prompt = prompt ? `${fromFile}\n\n${prompt}` : fromFile;
-  }
-
-  if (prompt === null && positionalTokens.length && !commandNames.has(positionalTokens[0])) {
-    prompt = positionalTokens.join(" ");
-  }
-
-  const hasPromptOrResume = Boolean(prompt !== null || resolvedPromptFile || hasResumeFlag || hasContinueFlag);
-
-  return {
-    resume,
-    resumeFlagIndex,
-    resumeInlinePrefix,
-    hasResumeFlag,
-    hasPromptOrResume,
-    prompt,
-    promptFile: resolvedPromptFile,
-    model,
-    effort,
-    tools,
-    hasAutoApproveFlag,
-    continue: hasContinueFlag
-  };
-}
-
-async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
-  const { options, positionals } = parseCliInput(argv);
-  const cwd = resolveCwd(options);
-  const env = process.env;
-  const args = [...positionals];
-  if (!args.length) {
-    throw new Error("Provide Grok CLI arguments, for example: grok-router cli --help");
-  }
-  if (args[0] === "grok") {
-    throw new Error("Do not include the grok binary name; provide only Grok CLI args.");
-  }
-  const help = readGrokHelp(cwd, env);
-  const classification = classifyCliArgs(args, help.text);
-  if (classification.mutating && !options["allow-mutating"]) {
-    throw new Error("Raw Grok command may mutate configuration or install state. Re-run with --allow-mutating only when the user explicitly requested this action.");
-  }
-  if (classification.unclassified && !options["allow-mutating"]) {
-    throw new Error("Raw Grok command is not classified yet. Re-run with --allow-mutating when the user explicitly requested it, or pass a known grok subcommand.");
-  }
-  const timeoutMs = options["timeout-ms"] !== undefined && options["timeout-ms"] !== null && options["timeout-ms"] !== ""
-    ? managedTimeoutMs(options["timeout-ms"])
-    : 0;
-  const meta = extractCliMetadata(args, cwd, help.text);
-  if (classification.helpOnly || !meta.hasPromptOrResume) {
-    const invocation = grokInvocation(args, env);
-    const result = await runProcessImpl(invocation.command, invocation.args, { cwd, env, timeoutMs });
-    if (result.stdout) {
-      process.stdout.write(result.stdout);
-    }
-    if (result.stderr) {
-      process.stderr.write(result.stderr);
-    }
-    process.exitCode = result.status ?? 1;
-    return;
-  }
-
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const priorJob = meta.resume && meta.resume !== true
-    ? findPriorJobForResume(workspaceRoot, meta.resume, env)
-    : (meta.continue ? findPriorJobForContinue(workspaceRoot, cwd, env) : null);
-  const resumedByJobId = Boolean(priorJob && meta.resume === priorJob.id);
-  const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
-  if (resumedByJobId && !priorSessionId) {
-    throw new Error(`Job ${priorJob.id} has no known Grok session.`);
-  }
-  const resumeSessionId = resumedByJobId
-    ? priorSessionId
-    : (meta.resume && meta.resume !== true ? meta.resume : null);
-  if (resumedByJobId && priorSessionId && meta.resumeFlagIndex !== -1) {
-    args[meta.resumeFlagIndex] = meta.resumeInlinePrefix
-      ? `${meta.resumeInlinePrefix}${priorSessionId}`
-      : priorSessionId;
-  }
-  const resumeOf = priorJob?.id ?? null;
-  const userRequest = (meta.prompt ?? args.join(" ")).trim();
-  const write = (meta.hasAutoApproveFlag || Boolean(classification.mutating))
-    ? true
-    : classifyCliToolsWrite(meta.tools);
-  const jobId = generateJobId("cli");
-  const logFile = createJobLogFile(workspaceRoot, jobId, "Grok CLI", env);
-  const request = {
-    mode: "cli",
-    workflow: "CLI",
-    write,
-    tools: meta.tools,
-    prompt: userRequest,
-    promptFile: meta.promptFile,
-    userRequest,
-    controls: {
-      model: meta.model,
-      effort: meta.effort,
-      timeoutMs: timeoutMs > 0 ? timeoutMs : null,
-      resume: resumeSessionId,
-      continue: meta.continue
-    },
-    nativeArgs: args
-  };
-  const job = saveJob(workspaceRoot, {
-    id: jobId,
-    jobClass: "grok",
-    kindLabel: "CLI",
-    mode: "cli",
-    title: userRequest.slice(0, 96),
-    summary: userRequest.slice(0, 96),
-    cwd,
-    workspaceRoot,
-    status: "queued",
-    phase: "queued",
-    write,
-    request,
-    resumeOf,
-    grokSessionId: null,
-    logFile,
-    createdAt: new Date().toISOString()
-  }, env);
-  emitJobStarted({ ...job, status: "running" });
-
-  const invocation = grokInvocation(args, env);
-  let rawResult = null;
-  await runTrackedJob(job, async (hooks) => {
-    appendLogLine(logFile, `Invoking Grok cli: ${args.join(" ")}`);
-    const result = await runProcessImpl(invocation.command, invocation.args, {
-      cwd,
-      env,
-      timeoutMs,
-      onSpawn: (processRecord) => hooks.updateProcess(processRecord),
-      onStdout: (chunk) => appendLogLine(logFile, chunk),
-      onStderr: (chunk) => appendLogLine(logFile, chunk)
-    });
-    rawResult = result;
-    const parsed = parseJsonOrNull(result.stdout?.trim?.() ? result.stdout.trim() : result.stdout);
-    const exitStatus = result.error ? 1 : (result.status ?? 1);
-    const jobStatus = result.timedOut ? "failed" : exitStatus === 0 ? "completed" : "failed";
-    const parsedSessionId = extractSessionId(parsed, result.stdout);
-    const sessionId = jobStatus === "completed" ? (parsedSessionId ?? "unknown") : null;
-    const text = extractGrokText(parsed, result.stdout);
-    return {
-      exitStatus,
-      jobStatus,
-      phase: result.timedOut ? "timed-out" : jobStatus === "completed" ? "done" : "failed",
-      grokSessionId: sessionId,
-      payload: {
-        mode: "cli",
-        workflow: "CLI",
-        command: invocation.command,
-        args,
-        timedOut: Boolean(result.timedOut),
-        signal: result.signal,
-        rawOutput: text,
-        parsedOutput: parsed,
-        structuredOutput: parsed?.structuredOutput ?? null,
-        stderr: result.stderr,
-        sessionId
-      },
-      rendered: (text || result.stderr || (result.error ? result.error.message : `Grok exited ${exitStatus} with no result.`)).trimEnd()
-    };
-  }, { env, trackChildProcess: true });
-
-  if (rawResult?.stdout) {
-    process.stdout.write(rawResult.stdout);
-  }
-  if (rawResult?.stderr) {
-    process.stderr.write(rawResult.stderr);
-  }
-  process.exitCode = rawResult?.status ?? 1;
 }
 
 async function runStoredJob(workspaceRoot, jobId, options = {}) {
@@ -1227,12 +756,10 @@ export {
   buildRouterRequest,
   classifyCliArgs,
   discoverRoutedSurface,
-  handleCli,
   handleRouted,
   main,
   parseCommandInput,
   parseRoutedInput,
   pluginVersion,
-  PUBLIC_COMMANDS,
-  resolveKnownSessionId
+  PUBLIC_COMMANDS
 };

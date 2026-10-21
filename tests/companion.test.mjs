@@ -4,7 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { shouldEmitLiveProgress, stripHostNoise } from "../plugins/grok-router/scripts/lib/render.mjs";
-import * as companionModule from "../plugins/grok-router/scripts/grok-companion.mjs";
+import { handleCli, resolveKnownSessionId } from "../plugins/grok-router/scripts/lib/cli.mjs";
+import { main } from "../plugins/grok-router/scripts/grok-companion.mjs";
 import { resolveJobFile, saveJob } from "../plugins/grok-router/scripts/lib/state.mjs";
 import { COMPANION, helpText, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
 
@@ -590,11 +591,11 @@ test("cli passes no timeout (0) to runProcess when --timeout-ms is absent", asyn
   process.stdout.write = () => true;
   let capturedRunProcessTimeoutMs;
   try {
-    await companionModule.main(["cli", "--cwd", tempDir, "-p", "Check default timeout", "--output-format", "json"]);
+    await main(["cli", "--cwd", tempDir, "-p", "Check default timeout", "--output-format", "json"]);
     assert.deepEqual(scheduledDelays, [], `expected no timeout timer in runProcess, got ${JSON.stringify(scheduledDelays)}`);
 
-    assert.equal(typeof companionModule.handleCli, "function");
-    await companionModule.handleCli(["--cwd", tempDir, "-p", "Check runProcess options", "--output-format", "json"], {
+    assert.equal(typeof handleCli, "function");
+    await handleCli(["--cwd", tempDir, "-p", "Check runProcess options", "--output-format", "json"], {
       runProcessImpl: async (_cmd, _args, opts) => {
         capturedRunProcessTimeoutMs = opts.timeoutMs;
         return { status: 0, stdout: '{"text":"ok","sessionId":"11111111-1111-4111-8111-111111111111"}\n', stderr: "", timedOut: false };
@@ -713,17 +714,17 @@ test("resolveKnownSessionId walks a resume chain of three or more jobs and handl
   }, env);
 
   // Walks 3-job chain (job3 -> job2 -> job1) and finds rootSid
-  assert.equal(typeof companionModule.resolveKnownSessionId, "function");
-  assert.equal(companionModule.resolveKnownSessionId(tempDir, job3, env), rootSid);
+  assert.equal(typeof resolveKnownSessionId, "function");
+  assert.equal(resolveKnownSessionId(tempDir, job3, env), rootSid);
 
   // Corrupt middle job file (job2) -> returns null without throwing
   const job2File = resolveJobFile(tempDir, job2.id, env);
   fs.writeFileSync(job2File, "{corrupted json", "utf8");
-  assert.equal(companionModule.resolveKnownSessionId(tempDir, job3, env), null);
+  assert.equal(resolveKnownSessionId(tempDir, job3, env), null);
 
   // Remove middle job file (job2) -> returns null without throwing
   fs.unlinkSync(job2File);
-  assert.equal(companionModule.resolveKnownSessionId(tempDir, job3, env), null);
+  assert.equal(resolveKnownSessionId(tempDir, job3, env), null);
 });
 
 test("cli -r <SID> preserves an explicit raw session ID even when a prior job with that resume target returned a different session", () => {
