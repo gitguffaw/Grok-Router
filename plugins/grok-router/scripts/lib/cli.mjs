@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { normalizeArgv } from "./args.mjs";
+import { splitRawArgumentString } from "./args.mjs";
 import {
   extractGrokText,
   extractSessionId,
@@ -168,8 +168,18 @@ function rejectionError(key, grammar) {
   );
 }
 
+function normalizeCliArgv(argv) {
+  if (argv[0] === "--raw-arg-string") {
+    if (argv.length !== 2) {
+      throw new Error("--raw-arg-string requires exactly one following token: the raw argument string");
+    }
+    return splitRawArgumentString(argv[1]);
+  }
+  return argv;
+}
+
 export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}) {
-  const rawTokens = normalizeArgv(argv);
+  const rawTokens = normalizeCliArgv(argv);
   const routerOptions = {};
   const passthroughArgs = [];
   const tokens = [];
