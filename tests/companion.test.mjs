@@ -1259,3 +1259,49 @@ test("[RED] Item 6 / C3: variadic flag values (including optional variadics) con
   const optVarJob = JSON.parse(runCompanion(["result", "--json", optVarId], tempDir).stdout);
   assert.equal(optVarJob.request.prompt, "--opt-files a.txt b.txt -c --output-format json", "[RED] C3: optional variadic [<FILE>...] consumes b.txt so b.txt is not extracted as a positional prompt");
 });
+
+test("[RED] Item 5 / C4: legacy job records without jobClass stay eligible for -c lookup and UUID/post-run reconciliation unless they are lane leaves by other fields", () => {
+  const tempDir = makeTempDir();
+  const env = testEnv(tempDir);
+  const sid = "66666666-6666-4666-8666-666666666666";
+
+  const legacyParent = saveJob(tempDir, {
+    id: "analyze-legacy038parent",
+    mode: "analyze",
+    title: "Legacy 0.3.8 analyze job without jobClass",
+    summary: "Legacy 0.3.8 analyze job without jobClass",
+    cwd: tempDir,
+    workspaceRoot: tempDir,
+    status: "completed",
+    phase: "done",
+    grokSessionId: sid,
+    createdAt: "2026-04-20T00:00:01.000Z",
+    completedAt: "2026-04-20T00:00:02.000Z"
+  }, env);
+
+  saveJob(tempDir, {
+    id: "panel-legacy038-lane-0",
+    mode: "panel",
+    lane: "alpha",
+    title: "Legacy lane leaf without jobClass",
+    summary: "Legacy lane leaf without jobClass",
+    cwd: tempDir,
+    workspaceRoot: tempDir,
+    status: "completed",
+    phase: "done",
+    grokSessionId: sid,
+    createdAt: "2026-04-20T00:00:03.000Z",
+    completedAt: "2026-04-20T00:00:04.000Z"
+  }, env);
+
+  const contRun = runCompanion(
+    ["cli", "-c", "-p", "Continue from legacy parent", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_SESSION: sid }
+  );
+  assert.equal(contRun.status, 0, contRun.stderr + contRun.stdout);
+  const contId = contRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  const contJob = JSON.parse(runCompanion(["result", "--json", contId], tempDir).stdout);
+  assert.equal(contJob.resumeOf, legacyParent.id, "[RED] C4: legacy parent job without jobClass is eligible for -c lookup while legacy lane leaf is skipped");
+});
+
