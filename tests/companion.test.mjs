@@ -943,10 +943,10 @@ test("[RED] T-A1b / A-G / A-I / R-D: cli tokenizer uses live grok --help for new
     tempDir,
     { GROK_FAKE_FIXTURES: customFixtures }
   );
-  assert.equal(withVariadicFlag.status, 0, `[RED] variadic <FILE>... consumes values up to next flag: ${withVariadicFlag.stderr}`);
+  assert.equal(withVariadicFlag.status, 0, `[GUARD] variadic <FILE>... with explicit -p succeeds: ${withVariadicFlag.stderr}`);
   const varId = withVariadicFlag.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   const varJob = JSON.parse(runCompanion(["result", "--json", varId], tempDir).stdout);
-  assert.equal(varJob.request.prompt, "hello", "[RED] variadic values do not leak into positional prompt");
+  assert.equal(varJob.request.prompt, "hello", "[GUARD] variadic values with explicit -p keep prompt 'hello'");
 
   const subcommandWithJson = runCompanion(["cli", "sessions", "--json"], tempDir);
   assert.equal(subcommandWithJson.status, 0, `[RED] router-named flag after subcommand must be forwarded, not rejected: ${subcommandWithJson.stderr}`);
@@ -1206,4 +1206,56 @@ test("[RED] C1 / Rule 1: a single cli argv element containing spaces is never im
   const rawArgString = runCompanion(["cli", "--raw-arg-string", "sessions --json"], tempDir);
   assert.equal(rawArgString.status, 0, rawArgString.stderr + rawArgString.stdout);
   assert.deepEqual(readArgv(tempDir).argv, ["sessions", "--json"], "[GUARD] --raw-arg-string explicitly splits raw slash-command strings");
+});
+
+test("[RED] C2 / Rule 2: unknown flags on cli fail closed (never allow a later --help to look help-only, never record write:false, and always track the job while forwarding argv verbatim)", () => {
+  const tempDir = makeTempDir();
+
+  for (const args of [
+    ["--future-value", "--help"],
+    ["--future-flag"],
+    ["-Z"],
+    ["-hZ", "--help", "--tools", "read_file"]
+  ]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    assert.ok(jobId, `[RED] C2: cli ${args.join(" ")} must fail closed and be tracked as a job (never untracked help-only)`);
+    const job = JSON.parse(runCompanion(["result", "--json", jobId], tempDir).stdout);
+    assert.equal(job.write, "unknown", `[RED] C2: cli ${args.join(" ")} records write: "unknown" (never false)`);
+    assert.deepEqual(job.request.nativeArgs, args, `[GUARD] Rule 1: cli ${args.join(" ")} forwards argv verbatim`);
+  }
+});
+
+test("[RED] Item 6 / C3: variadic flag values (including optional variadics) consume values up to the next flag without --best rejected as a router option", () => {
+  const tempDir = makeTempDir();
+  const customFixtures = path.join(tempDir, "custom-fixtures");
+  fs.mkdirSync(customFixtures, { recursive: true });
+  for (const name of fs.readdirSync(path.join(path.dirname(COMPANION), "..", "..", "..", "tests", "fixtures"))) {
+    const src = path.join(path.dirname(COMPANION), "..", "..", "..", "tests", "fixtures", name);
+    if (fs.statSync(src).isFile()) {
+      fs.copyFileSync(src, path.join(customFixtures, name));
+    }
+  }
+  fs.writeFileSync(
+    path.join(customFixtures, "grok-help.txt"),
+    helpText({
+      flags: `
+      --extra-files <FILE>...
+          Required variadic files
+      --opt-files [<FILE>...]
+          Optional variadic files
+`
+    }),
+    "utf8"
+  );
+
+  const optVarRun = runCompanion(
+    ["cli", "--opt-files", "a.txt", "b.txt", "-c", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_FIXTURES: customFixtures }
+  );
+  assert.equal(optVarRun.status, 0, optVarRun.stderr + optVarRun.stdout);
+  const optVarId = optVarRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  const optVarJob = JSON.parse(runCompanion(["result", "--json", optVarId], tempDir).stdout);
+  assert.equal(optVarJob.request.prompt, "--opt-files a.txt b.txt -c --output-format json", "[RED] C3: optional variadic [<FILE>...] consumes b.txt so b.txt is not extracted as a positional prompt");
 });
