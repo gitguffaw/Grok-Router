@@ -230,6 +230,26 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
       return currentIdx + 1;
     }
     if (grammar.optionalValueFlags.has(flagName) && next !== undefined && !String(next).startsWith("-")) {
+      if (grammar.variadicFlags.has(flagName)) {
+        const vals = [];
+        let cursor = currentIdx;
+        while (cursor + 1 < rawTokens.length) {
+          const candidate = String(rawTokens[cursor + 1] ?? "");
+          if (candidate === "--" || candidate.startsWith("-")) {
+            break;
+          }
+          cursor += 1;
+          passthroughArgs.push(candidate);
+          vals.push(candidate);
+        }
+        tokens.push(makeToken("option", token, {
+          name: flagName,
+          canonical,
+          value: vals.join(" "),
+          passthroughIndex
+        }));
+        return cursor;
+      }
       const valIdx = passthroughArgs.length;
       passthroughArgs.push(String(next));
       tokens.push(makeToken("option", token, {
@@ -311,10 +331,19 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
       if (rejectRouterFlags && CLI_REJECTED_ROUTER_OPTIONS.has(key)) {
         throw rejectionError(key, grammar);
       }
-      const canonical = grammar.canonicalFlag.get(flagName) ?? flagName;
+      const known = grammar.valueFlags.has(flagName) || grammar.optionalValueFlags.has(flagName) || grammar.booleanFlags.has(flagName);
+      const canonical = known ? (grammar.canonicalFlag.get(flagName) ?? flagName) : null;
       const passthroughIndex = passthroughArgs.length;
       passthroughArgs.push(token);
-      if (inlineVal !== undefined) {
+      if (!known) {
+        tokens.push(makeToken("option", token, {
+          name: flagName,
+          canonical: null,
+          value: inlineVal !== undefined ? inlineVal : true,
+          inline: inlineVal !== undefined,
+          passthroughIndex
+        }));
+      } else if (inlineVal !== undefined) {
         tokens.push(makeToken("option", token, {
           name: flagName,
           canonical,
@@ -333,6 +362,16 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
       const passthroughIndex = passthroughArgs.length;
       passthroughArgs.push(token);
       if (token.length === 2) {
+        const known = grammar.valueFlags.has(token) || grammar.optionalValueFlags.has(token) || grammar.booleanFlags.has(token);
+        if (!known) {
+          tokens.push(makeToken("option", token, {
+            name: token,
+            canonical: null,
+            value: true,
+            passthroughIndex
+          }));
+          continue;
+        }
         const canonical = grammar.canonicalFlag.get(token) ?? token;
         i = consumeSeparateFlagValue(token, token, canonical, passthroughIndex, i);
         continue;
@@ -411,11 +450,14 @@ export function classifyCliTokens(tokens, grammar) {
   }
   const firstPositional = firstPositionalIndex !== -1 ? tokens[firstPositionalIndex].raw : null;
   const firstToken = tokens[0]?.raw;
-  const hasTopLevelHelpOption = tokens.some(
+  const hasOpaqueOption = tokens.some(
+    (token) => token.kind === "option" && token.canonical === null
+  );
+  const hasTopLevelHelpOption = !hasOpaqueOption && tokens.some(
     (token) => token.kind === "option" && (token.canonical === "--help" || token.name === "--help" || token.name === "-h")
   );
   let hasSubcommandHelpOnly = false;
-  if (firstPositional && grammar.commandNames.has(firstPositional)) {
+  if (!hasOpaqueOption && firstPositional && grammar.commandNames.has(firstPositional)) {
     const afterSubcommand = [];
     let sawSeparator = false;
     for (let i = firstPositionalIndex + 1; i < tokens.length; i += 1) {
@@ -433,7 +475,7 @@ export function classifyCliTokens(tokens, grammar) {
       hasSubcommandHelpOnly = hasHelpFlag && allSafeSubcommandTokens;
     }
   }
-  const helpOnly = hasTopLevelHelpOption || firstPositional === "help" || hasSubcommandHelpOnly;
+  const helpOnly = !hasOpaqueOption && (hasTopLevelHelpOption || firstPositional === "help" || hasSubcommandHelpOnly);
   const subcommandCandidate = firstPositional && grammar.commandNames.has(firstPositional)
     ? firstPositional
     : firstToken;
@@ -532,6 +574,7 @@ export function extractCliMetadataFromTokens(tokens, cwd, grammar) {
     resumeToken,
     hasResumeFlag,
     hasForkFlag,
+    hasOpaqueOption,
     hasPromptOrResume,
     prompt,
     promptFile: resolvedPromptFile,
@@ -770,7 +813,7 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
   const userRequest = (meta.prompt ?? args.join(" ")).trim();
   const write = (meta.hasAutoApproveFlag || Boolean(classification.mutating))
     ? true
-    : classifyCliToolsWrite(meta.tools);
+    : (meta.hasOpaqueOption ? "unknown" : classifyCliToolsWrite(meta.tools));
   const jobId = generateJobId("cli");
   const logFile = createJobLogFile(workspaceRoot, jobId, "Grok CLI", env);
   const request = {
