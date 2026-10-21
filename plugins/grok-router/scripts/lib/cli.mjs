@@ -626,6 +626,16 @@ function compareCandidatesNewestFirst(left, right) {
   return String(right.id ?? "").localeCompare(String(left.id ?? ""));
 }
 
+function isEligibleParentJob(job) {
+  if (!job) {
+    return false;
+  }
+  if (job.jobClass) {
+    return job.jobClass === "grok";
+  }
+  return !job.lane && !Array.isArray(job.lanes) && !String(job.id ?? "").includes("-lane-") && !String(job.id ?? "").includes("-panel-");
+}
+
 function matchesSessionNonContradictory(job, sessionId) {
   if (!job || !sessionId) {
     return false;
@@ -656,7 +666,7 @@ export function findPriorJobForResume(workspaceRoot, target, env = process.env) 
     return null;
   }
   return (
-    jobs.find((job) => job.jobClass === "grok" && SUCCESSFUL_JOB_STATUSES.has(job.status) && matchesSessionNonContradictory(job, ref)) ??
+    jobs.find((job) => isEligibleParentJob(job) && SUCCESSFUL_JOB_STATUSES.has(job.status) && matchesSessionNonContradictory(job, ref)) ??
     null
   );
 }
@@ -667,7 +677,7 @@ export function findPriorJobForContinue(workspaceRoot, executionCwd, env = proce
   return (
     jobs.find(
       (job) =>
-        job.jobClass === "grok" &&
+        isEligibleParentJob(job) &&
         SUCCESSFUL_JOB_STATUSES.has(job.status) &&
         Boolean(job.grokSessionId && job.grokSessionId !== "unknown") &&
         effectiveExecutionCwd(job) === normalizedCwd
@@ -732,7 +742,7 @@ export function reconcileCompletedResumeOf(workspaceRoot, currentJob, execution,
   const upperBoundMs = Date.parse(currentJob.startedAt ?? currentJob.createdAt ?? "");
   const matching = allJobs
     .filter((cand) => {
-      if (cand.id === currentJob.id || cand.jobClass !== "grok" || !SUCCESSFUL_JOB_STATUSES.has(cand.status)) {
+      if (cand.id === currentJob.id || !isEligibleParentJob(cand) || !SUCCESSFUL_JOB_STATUSES.has(cand.status)) {
         return false;
       }
       const candDoneMs = Date.parse(cand.completedAt ?? cand.updatedAt ?? "");
