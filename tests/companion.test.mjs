@@ -1419,3 +1419,40 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
   );
 });
 
+test("[RED] A1: an unknown flag before a known subcommand is tracked, including when --help follows", () => {
+  const tempDir = makeTempDir();
+  for (const args of [
+    ["--future-value", "sessions", "--help"],
+    ["--future-value", "sessions"],
+    ["--future-value", "models"],
+    ["-Z", "sessions"]
+  ]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    assert.ok(jobId, `[RED] A1: cli ${args.join(" ")} must be tracked (never untracked passthrough)`);
+    assert.equal(res.status, 0, res.stderr + res.stdout);
+    assert.deepEqual(readArgv(tempDir).argv, args, `[GUARD] Rule 1: cli ${args.join(" ")} reaches grok verbatim`);
+  }
+});
+
+test("[RED] A2: misplaced --raw-arg-string and --timeout are rejected and never reach grok", () => {
+  const tempDir = makeTempDir();
+  for (const args of [
+    ["-p", "hi", "--raw-arg-string", "x"],
+    ["--raw-arg-string=-p", "hi"],
+    ["sessions", "--raw-arg-string", "x"],
+    ["--timeout", "5", "-p", "hi"],
+    ["--timeout=5", "models"],
+    ["models", "--timeout"]
+  ]) {
+    const argvPath = path.join(tempDir, "argv.json");
+    if (fs.existsSync(argvPath)) {
+      fs.unlinkSync(argvPath);
+    }
+    const res = runCompanion(["cli", ...args], tempDir);
+    assert.notEqual(res.status, 0, `[RED] A2: cli ${args.join(" ")} must be rejected`);
+    assert.equal(fs.existsSync(argvPath), false, `[RED] A2: cli ${args.join(" ")} must not reach grok`);
+    assert.match(res.stderr, /router option/, `[RED] A2: cli ${args.join(" ")} is rejected as a router option`);
+  }
+});
+
