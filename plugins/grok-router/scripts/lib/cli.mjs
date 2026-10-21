@@ -111,8 +111,6 @@ export function buildCliGrammar(helpInput = "") {
     }
   }
   const commandNames = new Set(FALLBACK_CLI_GRAMMAR.commands);
-  const canonicalCommand = new Map([...commandNames].map((name) => [name, name]));
-  const subactionCommands = new Set(MUTATING_SUBACTIONS.keys());
 
   function setArity(name, kind, isVariadic = false) {
     valueFlags.delete(name);
@@ -137,24 +135,9 @@ export function buildCliGrammar(helpInput = "") {
     for (const command of parsed.commands) {
       if (command.name) {
         commandNames.add(command.name);
-        canonicalCommand.set(command.name, command.name);
       }
       for (const alias of command.aliases ?? []) {
-        if (!alias) {
-          continue;
-        }
         commandNames.add(alias);
-        if (command.name) {
-          canonicalCommand.set(alias, command.name);
-        }
-      }
-      if (command.name && leadingSubactionVerbs(command.description).length > 0) {
-        subactionCommands.add(command.name);
-        for (const alias of command.aliases ?? []) {
-          if (alias) {
-            subactionCommands.add(alias);
-          }
-        }
       }
     }
     for (const flag of parsed.flags) {
@@ -179,23 +162,9 @@ export function buildCliGrammar(helpInput = "") {
     variadicFlags,
     canonicalFlag,
     commandNames,
-    canonicalCommand,
-    subactionCommands,
     mutatingCommands: MUTATING_COMMANDS,
     helpAvailable
   };
-}
-
-function leadingSubactionVerbs(description) {
-  const match = String(description ?? "").match(/^([A-Za-z][A-Za-z-]*(?:\s*,\s*(?:or\s+)?[A-Za-z][A-Za-z-]*)+)/);
-  if (!match) {
-    return [];
-  }
-  return match[1]
-    .toLowerCase()
-    .split(/\s*,\s*(?:or\s+)?|\s+or\s+/)
-    .map((word) => word.trim())
-    .filter(Boolean);
 }
 
 function makeToken(kind, raw, { name = null, canonical = null, value = null, inline = false, passthroughIndex = 0, passthroughValueIndex = null } = {}) {
@@ -522,40 +491,70 @@ function meansHelp(raw, grammar) {
   return raw === "--help" || grammar.canonicalFlag.get(raw) === "--help";
 }
 
-function positionalsBeforeSeparator(tokens) {
-  const positionals = [];
-  let afterSeparator = false;
+const SESSIONS_PAYLOAD_ACTIONS = new Set(["list", "search"]);
+const ARGUMENT_COMMANDS = new Set(["usage"]);
+
+function plainWordsBeforeSeparator(tokens) {
+  const words = [];
   for (const token of tokens) {
     if (token.kind === "separator") {
-      afterSeparator = true;
+      break;
+    }
+    if (token.kind !== "positional") {
       continue;
     }
-    if (afterSeparator || token.kind !== "positional") {
+    const raw = String(token.raw ?? "");
+    if (raw === "-" || raw.startsWith("-")) {
       continue;
     }
-    positionals.push(token.raw);
+    words.push(raw);
   }
-  return positionals;
+  return words;
 }
 
-function dispatchedPathMutating(positionals, grammar) {
-  const command = positionals[0];
-  if (!command || !grammar.commandNames.has(command)) {
-    return false;
+function payloadCut(words) {
+  function cutAfter(index) {
+    const command = words[index];
+    if (!command) {
+      return null;
+    }
+    if (CHILD_ARGV_COMMANDS.has(command) || ARGUMENT_COMMANDS.has(command)) {
+      return index + 1;
+    }
+    if (command === "sessions" && SESSIONS_PAYLOAD_ACTIONS.has(words[index + 1])) {
+      return index + 2;
+    }
+    return null;
   }
-  if (CHILD_ARGV_COMMANDS.has(command)) {
-    return false;
+  return cutAfter(0) ?? cutAfter(1) ?? words.length;
+}
+
+function candidateSlotsMutating(tokens, grammar) {
+  // Grok's usage is [OPTIONS] [PROMPT] [COMMAND]. The first two plain words
+  // are both candidate commands. Dash tokens are unknown options: they do
+  // not occupy a candidate slot or a sub-action slot, so `sessions --future
+  // delete` still sees `delete`. Known payload (wrap child argv, sessions
+  // list/search terms, usage arguments) is not a candidate and is not a
+  // sub-action.
+  const words = plainWordsBeforeSeparator(tokens);
+  const end = payloadCut(words);
+  const candidateCount = Math.min(2, end);
+  for (let i = 0; i < candidateCount; i += 1) {
+    const command = words[i];
+    if (grammar.mutatingCommands.has(command)) {
+      return true;
+    }
+    const actions = MUTATING_SUBACTIONS.get(command);
+    if (!actions) {
+      continue;
+    }
+    for (let j = i + 1; j < end; j += 1) {
+      if (actions.has(words[j])) {
+        return true;
+      }
+    }
   }
-  if (grammar.mutatingCommands.has(command)) {
-    return true;
-  }
-  const canonical = grammar.canonicalCommand?.get(command) ?? command;
-  if (!grammar.subactionCommands?.has(command) && !grammar.subactionCommands?.has(canonical)) {
-    return false;
-  }
-  const action = positionals[1];
-  const actions = MUTATING_SUBACTIONS.get(canonical) ?? MUTATING_SUBACTIONS.get(command);
-  return Boolean(action && actions && actions.has(action));
+  return false;
 }
 
 export function classifyCliTokens(tokens, grammar) {
@@ -597,8 +596,7 @@ export function classifyCliTokens(tokens, grammar) {
     }
   }
   const helpOnly = !hasOpaqueOption && (hasTopLevelHelpOption || firstPositional === "help" || hasSubcommandHelpOnly);
-  const beforeSeparator = positionalsBeforeSeparator(tokens);
-  const mutating = !helpOnly && dispatchedPathMutating(beforeSeparator, grammar);
+  const mutating = !helpOnly && candidateSlotsMutating(tokens, grammar);
   const unclassified = !helpOnly && Boolean(
     firstToken &&
     !grammar.commandNames.has(firstToken) &&
