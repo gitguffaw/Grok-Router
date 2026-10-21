@@ -560,9 +560,9 @@ test("cli only tracks prompt or session-resume runs and leaves help/discovery su
   assert.equal(helpRun.status, 0, helpRun.stderr);
   assert.equal(/Job ID:/.test(helpRun.stderr), false);
 
-  const modelsRun = runCompanion(["cli", "models"], tempDir);
-  assert.equal(modelsRun.status, 0, modelsRun.stderr);
-  assert.equal(/Job ID:/.test(modelsRun.stderr), false);
+  const doctorRun = runCompanion(["cli", "doctor"], tempDir);
+  assert.equal(doctorRun.status, 0, doctorRun.stderr);
+  assert.equal(/Job ID:/.test(doctorRun.stderr), false);
 
   const cloneHelpRun = runCompanion(["cli", "clone", "--help"], tempDir);
   assert.equal(cloneHelpRun.status, 0, cloneHelpRun.stderr);
@@ -1405,6 +1405,35 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
       }
     }
   }
+  const promptPrefixes = [
+    ["--tools", "read_file", "-p", "hi"],
+    ["--tools", "read_file", "-c"],
+    ["--tools", "read_file", "--resume", "resume-title"]
+  ];
+  const mutatingNames = new Set(["login", "logout", "plugin", "mcp", "setup", "update", "memory", "worktree", "clone"]);
+  const commandTails = commands.map((command) => [command]);
+  commandTails.push(["doctor", "fix"], ["sessions", "delete", "X"], ["sessions", "restore", "X"]);
+  const mixedFalseWrite = [];
+  const mixedNotRefused = [];
+  for (const prefix of promptPrefixes) {
+    for (const tail of commandTails) {
+      const args = [...prefix, ...tail];
+      const res = runCompanion(["cli", ...args], tempDir);
+      const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+      if (jobId) {
+        const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, jobId, env), "utf8"));
+        if (job.write === false || job.request?.write === false) {
+          mixedFalseWrite.push(args.join(" "));
+        }
+      }
+      const mutating = mutatingNames.has(tail[0])
+        || (tail[0] === "doctor" && tail[1] === "fix")
+        || (tail[0] === "sessions" && (tail[1] === "delete" || tail[1] === "restore"));
+      if (mutating && (res.status === 0 || !/--allow-mutating/.test(res.stderr))) {
+        mixedNotRefused.push(args.join(" "));
+      }
+    }
+  }
 
   const routerBases = [
     ["--help"],
@@ -1472,6 +1501,11 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
     0,
     `[RED] R2 allow-list: ${falseWrite.length} injected-unknown shapes recorded write:false, including: ${sample(falseWrite)}`
   );
+  assert.equal(
+    mixedFalseWrite.length + mixedNotRefused.length,
+    0,
+    `[RED] Y1: ${mixedFalseWrite.length} prompt/resume+subcommand shapes recorded write:false (${sample(mixedFalseWrite)}); ${mixedNotRefused.length} mutating shapes were not refused (${sample(mixedNotRefused)})`
+  );
 });
 
 test("[RED] X1: an unknown option after a subcommand records write unknown even with read-only --tools", () => {
@@ -1529,11 +1563,8 @@ test("[RED] X2: child-argv help and non-read-only subcommands are tracked", () =
 
   for (const args of [
     ["wrap", "--help"],
-    ["models"],
     ["doctor"],
     ["sessions"],
-    ["du"],
-    ["disk-usage"],
     ["completions"],
     ["inspect"],
     ["usage"],
@@ -1557,6 +1588,102 @@ test("[RED] X3: --version, -v, and help of a known command stay untracked", () =
   }
   const unknownHelp = runCompanion(["cli", "help", "not-a-command"], tempDir);
   assert.match(unknownHelp.stderr, /Job ID:\s+\S+/, "[GUARD] help of an unknown command stays tracked");
+});
+
+test("[RED] Y1: a prompt or resume mixed with a mutating sub-action is refused and does not record write:false", () => {
+  const tempDir = makeTempDir();
+  const helpOnly = runCompanion(["cli", "doctor", "fix", "--help"], tempDir);
+  assert.equal(helpOnly.status, 0, helpOnly.stderr + helpOnly.stdout);
+  assert.equal(/Job ID:/.test(helpOnly.stderr), false, "[GUARD] doctor fix --help stays help-only");
+
+  const cases = [
+    ["--tools", "read_file", "-p", "hi", "doctor", "fix"],
+    ["--tools", "read_file", "-c", "doctor", "fix"],
+    ["-p", "hi", "sessions", "delete", "X"],
+    ["doctor", "fix"],
+    ["sessions", "restore", "X"]
+  ];
+  const problems = [];
+  for (const args of cases) {
+    const argvPath = path.join(tempDir, "argv.json");
+    if (fs.existsSync(argvPath)) {
+      fs.unlinkSync(argvPath);
+    }
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (jobId) {
+      const job = JSON.parse(runCompanion(["result", "--json", jobId], tempDir).stdout);
+      if (job.write === false || job.request?.write === false) {
+        problems.push(`${args.join(" ")} recorded write:false`);
+      }
+    }
+    if (res.status === 0 || !/--allow-mutating/.test(res.stderr)) {
+      problems.push(`${args.join(" ")} was not refused`);
+    }
+    const allowed = runCompanion(["cli", "--allow-mutating", ...args], tempDir);
+    const allowedId = allowed.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (!allowedId) {
+      problems.push(`--allow-mutating ${args.join(" ")} was not tracked`);
+    } else {
+      const job = JSON.parse(runCompanion(["result", "--json", allowedId], tempDir).stdout);
+      if (job.write !== "unknown") {
+        problems.push(`--allow-mutating ${args.join(" ")} recorded write:${JSON.stringify(job.write)}`);
+      }
+      const recorded = readArgv(tempDir)?.argv ?? [];
+      if (JSON.stringify(recorded) !== JSON.stringify(args)) {
+        problems.push(`--allow-mutating ${args.join(" ")} argv ${recorded.join(" ")}`);
+      }
+    }
+  }
+  assert.equal(problems.length, 0, `[RED] Y1: ${problems.join(" || ")}`);
+});
+
+test("[RED] Y2: bare models, du, and disk-usage are tracked", () => {
+  const tempDir = makeTempDir();
+  for (const args of [["models"], ["du"], ["disk-usage"]]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    assert.ok(jobId, `[RED] Y2: cli ${args.join(" ")} must be tracked`);
+    const recorded = readArgv(tempDir)?.argv ?? [];
+    assert.deepEqual(recorded, args, `[GUARD] Rule 1: cli ${args.join(" ")} reaches grok verbatim`);
+  }
+});
+
+test("[RED] Y3: -h and -v follow the grok help canonical, not the spelling", () => {
+  const tempDir = makeTempDir();
+  for (const args of [["-h"], ["-v"], ["--help"], ["--version"]]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    assert.equal(res.status, 0, res.stderr + res.stdout);
+    assert.equal(/Job ID:/.test(res.stderr), false, `[GUARD] fixture -h/--help and -v/--version stay untracked: ${args.join(" ")}`);
+  }
+  const loginHelp = runCompanion(["cli", "login", "-h"], tempDir);
+  assert.equal(loginHelp.status, 0, loginHelp.stderr + loginHelp.stdout);
+  assert.equal(/Job ID:/.test(loginHelp.stderr), false, "[GUARD] login -h is help when the fixture says -h means --help");
+
+  const customDir = path.join(tempDir, "custom-fixtures");
+  fs.mkdirSync(customDir, { recursive: true });
+  for (const name of fs.readdirSync(FIXTURES)) {
+    const src = path.join(FIXTURES, name);
+    if (!fs.statSync(src).isFile()) {
+      continue;
+    }
+    let text = fs.readFileSync(src, "utf8");
+    if (name === "grok-help.txt") {
+      text = text
+        .replace("  -h, --help\n", "  -h, --verbose\n")
+        .replace("  -v, --version\n", "  -v, --loud\n");
+    }
+    fs.writeFileSync(path.join(customDir, name), text);
+  }
+  const extras = { GROK_FAKE_FIXTURES: customDir };
+  for (const args of [["-h"], ["-v"]]) {
+    const res = runCompanion(["cli", ...args], tempDir, extras);
+    assert.match(res.stderr, /Job ID:\s+\S+/, `[RED] Y3: cli ${args.join(" ")} must be tracked when help remaps it`);
+  }
+  const remappedLogin = runCompanion(["cli", "login", "-h"], tempDir, extras);
+  assert.match(remappedLogin.stderr, /--allow-mutating/, "[RED] Y3: login -h requires --allow-mutating when -h is not help");
+  const longHelp = runCompanion(["cli", "--help"], tempDir, extras);
+  assert.equal(/Job ID:/.test(longHelp.stderr), false, "[GUARD] --help stays untracked when only the short flag is remapped");
 });
 
 test("[RED] X3: --raw-arg-string with the wrong number of arguments names the arity", () => {
