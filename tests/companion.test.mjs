@@ -1349,8 +1349,34 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
     commandBases.push([command, "--help"]);
     commandBases.push([command, "-h"]);
   }
+  const writeBases = [["--tools", "read_file", "-p", "hi"]];
+  for (const command of commands) {
+    writeBases.push(["--tools", "read_file", command]);
+    writeBases.push(["--tools", "read_file", command, "list"]);
+  }
   const unknownInjections = ["--future-value", "-Z", "--future-value=v"];
   const untracked = [];
+  const falseWrite = [];
+  const env = testEnv(tempDir);
+  function noteInjectedWrite(args, index, res) {
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (!jobId) {
+      return;
+    }
+    const previous = index > 0 ? args[index - 1] : null;
+    const injection = args[index];
+    const injectionIsValue = Boolean(
+      previous &&
+      (grammar.valueFlags.has(previous) || (grammar.optionalValueFlags.has(previous) && !String(injection).startsWith("-")))
+    );
+    if (injectionIsValue) {
+      return;
+    }
+    const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, jobId, env), "utf8"));
+    if (job.write === false || job.request?.write === false) {
+      falseWrite.push(args.join(" "));
+    }
+  }
   for (const base of commandBases) {
     for (let index = 0; index <= base.length; index += 1) {
       for (const injection of unknownInjections) {
@@ -1366,6 +1392,16 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
         if (!helpProbeOnly && !tracked) {
           untracked.push(args.join(" "));
         }
+        noteInjectedWrite(args, index, res);
+      }
+    }
+  }
+  for (const base of writeBases) {
+    for (let index = 0; index <= base.length; index += 1) {
+      for (const injection of unknownInjections) {
+        const args = spliceToken(base, index, injection);
+        const res = runCompanion(["cli", ...args], tempDir);
+        noteInjectedWrite(args, index, res);
       }
     }
   }
@@ -1431,6 +1467,125 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
     0,
     `[RED] R2 allow-list: ${leaked.length} router-owned options reached grok, including: ${sample(leaked)}`
   );
+  assert.equal(
+    falseWrite.length,
+    0,
+    `[RED] R2 allow-list: ${falseWrite.length} injected-unknown shapes recorded write:false, including: ${sample(falseWrite)}`
+  );
+});
+
+test("[RED] X1: an unknown option after a subcommand records write unknown even with read-only --tools", () => {
+  const tempDir = makeTempDir();
+  for (const args of [
+    ["--tools", "read_file", "sessions", "--future-flag"],
+    ["--tools", "read_file", "sessions", "list", "--future-flag"]
+  ]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    assert.equal(res.status, 0, res.stderr + res.stdout);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    assert.ok(jobId, `[RED] X1: cli ${args.join(" ")} must be tracked`);
+    const job = JSON.parse(runCompanion(["result", "--json", jobId], tempDir).stdout);
+    assert.equal(job.write, "unknown", `[RED] X1: cli ${args.join(" ")} must record write:"unknown"`);
+    assert.equal(job.request.write, "unknown");
+    assert.deepEqual(job.request.nativeArgs, args, `[GUARD] Rule 1: cli ${args.join(" ")} reaches grok verbatim`);
+  }
+
+  const classified = runCompanion(
+    ["cli", "--tools", "read_file", "-p", "hello", "--output-format", "json"],
+    tempDir
+  );
+  const classifiedId = classified.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(classifiedId);
+  const classifiedJob = JSON.parse(runCompanion(["result", "--json", classifiedId], tempDir).stdout);
+  assert.equal(classifiedJob.write, false, "[GUARD] a fully classified read-only prompt still records write:false");
+
+  const literal = runCompanion(
+    ["cli", "--tools", "read_file", "-p", "hello", "--", "--future-flag"],
+    tempDir
+  );
+  const literalId = literal.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(literalId);
+  const literalJob = JSON.parse(runCompanion(["result", "--json", literalId], tempDir).stdout);
+  assert.equal(literalJob.write, false, "[GUARD] a token after -- is literal payload and does not unset a classified write:false");
+});
+
+test("[RED] X2: child-argv help and non-read-only subcommands are tracked", () => {
+  const tempDir = makeTempDir();
+  for (const args of [
+    ["wrap", "echo", "hi", "--help"],
+    ["agent"],
+    ["cursor-worker"],
+    ["dashboard"],
+    ["leader"],
+    ["export"],
+    ["trace"]
+  ]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    assert.ok(jobId, `[RED] X2: cli ${args.join(" ")} must be tracked`);
+    const job = JSON.parse(runCompanion(["result", "--json", jobId], tempDir).stdout);
+    assert.deepEqual(job.request.nativeArgs, args, `[GUARD] Rule 1: cli ${args.join(" ")} reaches grok verbatim`);
+  }
+
+  for (const args of [
+    ["wrap", "--help"],
+    ["models"],
+    ["doctor"],
+    ["sessions"],
+    ["du"],
+    ["disk-usage"],
+    ["completions"],
+    ["inspect"],
+    ["usage"],
+    ["version"],
+    ["v"],
+    ["help"],
+    ["export", "--help"]
+  ]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    assert.equal(res.status, 0, res.stderr + res.stdout);
+    assert.equal(/Job ID:/.test(res.stderr), false, `[GUARD] cli ${args.join(" ")} stays untracked`);
+  }
+});
+
+test("[RED] X3: --version, -v, and help of a known command stay untracked", () => {
+  const tempDir = makeTempDir();
+  for (const args of [["--version"], ["-v"], ["help", "sessions"], ["help", "models"]]) {
+    const res = runCompanion(["cli", ...args], tempDir);
+    assert.equal(res.status, 0, res.stderr + res.stdout);
+    assert.equal(/Job ID:/.test(res.stderr), false, `[RED] cli ${args.join(" ")} must be untracked`);
+  }
+  const unknownHelp = runCompanion(["cli", "help", "not-a-command"], tempDir);
+  assert.match(unknownHelp.stderr, /Job ID:\s+\S+/, "[GUARD] help of an unknown command stays tracked");
+});
+
+test("[RED] X3: --raw-arg-string with the wrong number of arguments names the arity", () => {
+  const tempDir = makeTempDir();
+  for (const args of [
+    ["--raw-arg-string"],
+    ["--raw-arg-string", "doctor --debug", "extra"]
+  ]) {
+    const argvPath = path.join(tempDir, "argv.json");
+    if (fs.existsSync(argvPath)) {
+      fs.unlinkSync(argvPath);
+    }
+    const res = runCompanion(["cli", ...args], tempDir);
+    assert.notEqual(res.status, 0, `[RED] cli ${args.join(" ")} must be rejected`);
+    assert.match(
+      res.stderr,
+      /--raw-arg-string requires exactly one following token/,
+      `[RED] cli ${args.join(" ")} must name the arity, not a generic router-option error`
+    );
+    const recorded = readArgv(tempDir)?.argv ?? [];
+    assert.equal(
+      recorded.some((arg) => arg === "--raw-arg-string" || String(arg).startsWith("--raw-arg-string=")),
+      false,
+      `[GUARD] cli ${args.join(" ")} must not reach grok`
+    );
+  }
+  const ok = runCompanion(["cli", "--raw-arg-string", "doctor --debug"], tempDir);
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+  assert.deepEqual(readArgv(tempDir).argv, ["doctor", "--debug"], "[GUARD] one following token still splits");
 });
 
 test("[RED] A1: an unknown flag before a known subcommand is tracked, including when --help follows", () => {
