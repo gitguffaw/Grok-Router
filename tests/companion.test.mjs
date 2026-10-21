@@ -1170,3 +1170,25 @@ test("[RED] M1: router job IDs inside short clusters or inline -r= are refused (
     assert.equal(ok.status, 0, `[GUARD] standalone ${standaloneArgs.join(" ")} succeeds: ${ok.stderr}`);
   }
 });
+
+test("[RED] M2: result <id> --lane 0 and status <id> --json honor options placed after the job ID", () => {
+  const tempDir = makeTempDir();
+  const panelRun = runCompanion(["exec", "--lanes", "alpha,beta", "--best", "--json", "Complete lane work."], tempDir);
+  assert.equal(panelRun.status, 0, "[SETUP] panel run succeeds");
+  const panel = JSON.parse(panelRun.stdout);
+
+  const laneTextOut = runCompanion(["result", panel.id, "--lane", "0"], tempDir);
+  assert.equal(laneTextOut.status, 0, laneTextOut.stderr);
+  assert.match(laneTextOut.stdout, new RegExp(`# Grok Job Result ${panel.lanes[0].id}`), "[RED] M2: result <id> --lane 0 returns the leaf job, not the parent panel");
+
+  const laneJsonOut = runCompanion(["result", panel.id, "--lane", "0", "--json"], tempDir);
+  assert.equal(laneJsonOut.status, 0, laneJsonOut.stderr);
+  const leaf = JSON.parse(laneJsonOut.stdout);
+  assert.equal(leaf.jobClass, "grok-lane", "[RED] M2: result <id> --lane 0 --json returns leaf JSON");
+  assert.equal(leaf.lane, "alpha", "[RED] M2: result <id> --lane 0 returns lane alpha");
+
+  const statusOut = runCompanion(["status", panel.id, "--json"], tempDir);
+  assert.equal(statusOut.status, 0, statusOut.stderr);
+  const statusPayload = JSON.parse(statusOut.stdout);
+  assert.equal(statusPayload.id, panel.id, "[RED] M2: status <id> --json outputs JSON");
+});
