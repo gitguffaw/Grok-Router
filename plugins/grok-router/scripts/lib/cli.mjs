@@ -175,7 +175,7 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
   const tokens = [];
   let inOptionPosition = true;
 
-  function consumeSeparateFlagValue(token, flagName, canonical, passthroughIndex, currentIdx) {
+  function consumeSeparateFlagValue(token, flagName, canonical, passthroughIndex, currentIdx, { allowRewrite = true } = {}) {
     const next = rawTokens[currentIdx + 1];
     if (grammar.valueFlags.has(flagName)) {
       if (next === undefined) {
@@ -204,7 +204,7 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
           canonical,
           value: values.length === 1 ? values[0] : values,
           passthroughIndex,
-          passthroughValueIndex: firstValIdx
+          passthroughValueIndex: allowRewrite ? firstValIdx : null
         }));
         return cursor;
       }
@@ -215,7 +215,7 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
         canonical,
         value: String(next),
         passthroughIndex,
-        passthroughValueIndex: valIdx
+        passthroughValueIndex: allowRewrite ? valIdx : null
       }));
       return currentIdx + 1;
     }
@@ -227,7 +227,7 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
         canonical,
         value: String(next),
         passthroughIndex,
-        passthroughValueIndex: valIdx
+        passthroughValueIndex: allowRewrite ? valIdx : null
       }));
       return currentIdx + 1;
     }
@@ -361,7 +361,7 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
               passthroughIndex
             }));
           } else {
-            i = consumeSeparateFlagValue(token, shortFlag, canonical, passthroughIndex, i);
+            i = consumeSeparateFlagValue(token, shortFlag, canonical, passthroughIndex, i, { allowRewrite: false });
           }
           break;
         }
@@ -743,6 +743,9 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
     ? findPriorJobForResume(workspaceRoot, meta.resume, env)
     : (meta.continue ? findPriorJobForContinue(workspaceRoot, cwd, env) : null);
   const resumedByJobId = Boolean(priorJob && meta.resume === priorJob.id);
+  if (resumedByJobId && (!meta.resumeToken || meta.resumeToken.passthroughValueIndex === null || meta.resumeToken.passthroughValueIndex === undefined)) {
+    throw new Error(`Router job ID "${priorJob.id}" cannot be translated inside "${meta.resumeToken?.raw ?? "-r"}". Pass standalone -r ${priorJob.id} or --resume ${priorJob.id}.`);
+  }
   const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
   if (resumedByJobId && !priorSessionId) {
     throw new Error(`Job ${priorJob.id} has no known Grok session.`);
