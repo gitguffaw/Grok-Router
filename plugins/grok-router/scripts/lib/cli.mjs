@@ -30,8 +30,12 @@ const MUTATING_COMMANDS = new Set([
 ]);
 
 const READ_ONLY_CLI_SUBCOMMANDS = new Set([
-  "completions", "doctor", "du", "disk-usage", "help", "inspect", "models", "sessions",
-  "usage", "version", "v"
+  "completions", "doctor", "help", "inspect", "sessions", "usage", "version", "v"
+]);
+
+const MUTATING_SUBACTIONS = new Map([
+  ["doctor", new Set(["fix"])],
+  ["sessions", new Set(["delete", "restore"])]
 ]);
 
 const CHILD_ARGV_COMMANDS = new Set(["wrap"]);
@@ -483,6 +487,41 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
   return { routerOptions, passthroughArgs, tokens };
 }
 
+function meansHelp(raw, grammar) {
+  return raw === "--help" || grammar.canonicalFlag.get(raw) === "--help";
+}
+
+function positionalsBeforeSeparator(tokens) {
+  const positionals = [];
+  let afterSeparator = false;
+  for (const token of tokens) {
+    if (token.kind === "separator") {
+      afterSeparator = true;
+      continue;
+    }
+    if (afterSeparator || token.kind !== "positional") {
+      continue;
+    }
+    positionals.push(token.raw);
+  }
+  return positionals;
+}
+
+function hasMutatingSubaction(positionals) {
+  for (let i = 0; i < positionals.length; i += 1) {
+    const actions = MUTATING_SUBACTIONS.get(positionals[i]);
+    if (!actions) {
+      continue;
+    }
+    for (let j = i + 1; j < positionals.length; j += 1) {
+      if (actions.has(positionals[j])) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function classifyCliTokens(tokens, grammar) {
   let firstPositionalIndex = -1;
   for (let i = 0; i < tokens.length; i += 1) {
@@ -500,7 +539,7 @@ export function classifyCliTokens(tokens, grammar) {
     (token) => token.kind === "option" && token.canonical === null
   );
   const hasTopLevelHelpOption = !hasOpaqueOption && tokens.some(
-    (token) => token.kind === "option" && (token.canonical === "--help" || token.name === "--help" || token.name === "-h")
+    (token) => token.kind === "option" && token.canonical === "--help"
   );
   let hasSubcommandHelpOnly = false;
   if (!hasOpaqueOption && firstPositional && grammar.commandNames.has(firstPositional)) {
@@ -514,18 +553,19 @@ export function classifyCliTokens(tokens, grammar) {
       afterSubcommand.push(tokens[i].raw);
     }
     if (!sawSeparator && afterSubcommand.length > 0) {
-      const hasHelpFlag = afterSubcommand.some((arg) => arg === "--help" || arg === "-h");
+      const hasHelpFlag = afterSubcommand.some((arg) => meansHelp(arg, grammar));
       const allSafeSubcommandTokens = afterSubcommand.every(
-        (arg) => arg === "--help" || arg === "-h" || !arg.startsWith("-")
+        (arg) => meansHelp(arg, grammar) || !arg.startsWith("-")
       );
       hasSubcommandHelpOnly = hasHelpFlag && allSafeSubcommandTokens;
     }
   }
   const helpOnly = !hasOpaqueOption && (hasTopLevelHelpOption || firstPositional === "help" || hasSubcommandHelpOnly);
-  const subcommandCandidate = firstPositional && grammar.commandNames.has(firstPositional)
-    ? firstPositional
-    : firstToken;
-  const mutating = !helpOnly && Boolean(subcommandCandidate && grammar.mutatingCommands.has(subcommandCandidate));
+  const beforeSeparator = positionalsBeforeSeparator(tokens);
+  const mutating = !helpOnly && (
+    beforeSeparator.some((name) => grammar.mutatingCommands.has(name)) ||
+    hasMutatingSubaction(beforeSeparator)
+  );
   const unclassified = !helpOnly && Boolean(
     firstToken &&
     !grammar.commandNames.has(firstToken) &&
@@ -543,13 +583,8 @@ export function isUntrackedCliAllowList(tokens, grammar) {
     return false;
   }
   const raw = tokens.map((token) => token.raw);
-  if (raw.length === 1 && (raw[0] === "--help" || raw[0] === "-h")) {
-    const token = tokens[0];
-    return token.kind === "option" && (token.canonical === "--help" || token.name === "--help" || token.name === "-h");
-  }
-  if (raw.length === 1 && (raw[0] === "--version" || raw[0] === "-v")) {
-    const token = tokens[0];
-    return token.kind === "option" && (token.canonical === "--version" || token.name === "--version" || token.name === "-v");
+  if (raw.length === 1 && tokens[0].kind === "option" && (tokens[0].canonical === "--help" || tokens[0].canonical === "--version")) {
+    return true;
   }
   if (
     raw.length === 1 &&
@@ -568,17 +603,24 @@ export function isUntrackedCliAllowList(tokens, grammar) {
   if (!rest.length) {
     return false;
   }
-  if (CHILD_ARGV_COMMANDS.has(raw[0]) && rest.some((token) => token !== "--help" && token !== "-h")) {
+  if (CHILD_ARGV_COMMANDS.has(raw[0]) && rest.some((token) => !meansHelp(token, grammar))) {
     return false;
   }
-  const helpCount = rest.filter((token) => token === "--help" || token === "-h").length;
+  const helpCount = rest.filter((token) => meansHelp(token, grammar)).length;
   if (helpCount < 1) {
     return false;
   }
-  return rest.every((token) => token === "--help" || token === "-h" || !token.startsWith("-"));
+  return rest.every((token) => meansHelp(token, grammar) || !token.startsWith("-"));
 }
 
-function hasUnparsedOption(tokens) {
+function isFullyParsedPromptOrResume(tokens, meta, grammar) {
+  if (meta.hasOpaqueOption) {
+    return false;
+  }
+  const prompted = meta.prompt !== null || Boolean(meta.promptFile) || meta.hasResumeFlag || Boolean(meta.continue);
+  if (!prompted) {
+    return false;
+  }
   let afterSeparator = false;
   for (const token of tokens) {
     if (token.kind === "separator") {
@@ -588,14 +630,31 @@ function hasUnparsedOption(tokens) {
     if (afterSeparator) {
       continue;
     }
-    if (token.kind === "option" && token.canonical === null) {
-      return true;
+    if (token.kind !== "option" || token.canonical === null) {
+      return false;
     }
-    if (token.kind === "positional" && token.raw !== "-" && String(token.raw).startsWith("-")) {
-      return true;
+    if (grammar.valueFlags.has(token.name) && (token.value === null || token.value === undefined)) {
+      return false;
     }
   }
-  return false;
+  return true;
+}
+
+function classifyCliWrite(tokens, meta, grammar) {
+  if (!isFullyParsedPromptOrResume(tokens, meta, grammar)) {
+    return "unknown";
+  }
+  if (meta.hasAutoApproveFlag) {
+    return true;
+  }
+  const toolsWrite = classifyCliToolsWrite(meta.tools);
+  if (toolsWrite === true) {
+    return true;
+  }
+  if (toolsWrite === false) {
+    return false;
+  }
+  return "unknown";
 }
 
 export function classifyCliArgs(args, helpText = "") {
@@ -930,10 +989,7 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
     : passthroughArgs;
   const resumeOf = priorJob?.id ?? null;
   const userRequest = (meta.prompt ?? args.join(" ")).trim();
-  const shapeUnclassified = hasUnparsedOption(tokens) || classification.unclassified || !meta.hasPromptOrResume;
-  const write = (meta.hasAutoApproveFlag || Boolean(classification.mutating))
-    ? true
-    : (shapeUnclassified ? "unknown" : classifyCliToolsWrite(meta.tools));
+  const write = classifyCliWrite(tokens, meta, grammar);
   const jobId = generateJobId("cli");
   const logFile = createJobLogFile(workspaceRoot, jobId, "Grok CLI", env);
   const request = {

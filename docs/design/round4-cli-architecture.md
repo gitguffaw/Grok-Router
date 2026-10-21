@@ -34,34 +34,39 @@ Several round-4a review findings (`R-B`, `R-C`, `R-D`) stemmed from trying to ma
    - The **sole** exception where a native argument value is translated is when the user explicitly passes a router `<jobId>` to standalone `-r <jobId>`, `--resume <jobId>`, or `--resume=<jobId>` (the documented router convenience feature from #5 / Finding 4). If a router `<jobId>` is embedded inside an ambiguous or combined short cluster (e.g., `-cr=<jobId>`), the router does not rewrite the cluster; it fails closed or requires standalone `-r <jobId>` / `--resume <jobId>`.
 2. **Rule (2) — Fail closed on ambiguity**:
    - Untracked `cli` is an allow-list, not a denylist. A run is untracked only when every option is recognized from the grammar built from live `grok --help` and the whole shape is one of:
-     1. bare `--help` / `-h`, or bare `--version` / `-v` (both were untracked in 0.3.8),
+     1. bare `--help` / `-h`, or bare `--version` / `-v`, only when the grammar built from `grok --help` maps that spelling to `--help` or `--version` (both were untracked in 0.3.8 when the fixture agreed),
      2. `help <known subcommand...>` where every token after `help` is a command name from that grammar,
      3. `<known subcommand> [--help | -h]...` with at least one help flag, nothing before the subcommand, and no other dash token. A child-argv command is the exception: `wrap` forwards trailing argv to a child, so any non-help token (`cli wrap echo hi --help`) is tracked. `cli wrap --help` with only help flags stays untracked,
      4. a bare command from the explicit read-only set `READ_ONLY_CLI_SUBCOMMANDS` (evidence in the table below).
    - Anything else is tracked, or rejected when the token is an unconsumed router-owned option. That includes an unknown long flag, an unknown short flag, an unknown `--flag=value`, any token before a subcommand (`cli --future-value sessions --help`, `cli -Z sessions`), and bare commands that execute, mutate, register, or network. A new grok subcommand is tracked until it is added to that set.
    - A router-owned flag name cannot be passed through to a grok subcommand. `ROUTER_OWNED_OPTIONS` and `CLI_REJECTED_ROUTER_OPTIONS` (including `--json`, `-C` / `--cwd`, `--timeout`, and `--raw-arg-string`) are rejected in every position where they are not consumed by the router. There is no escape hatch if grok later adds one of those names to a subcommand. `--` forwards the following tokens literally, and it also ends grok's option parsing, so it does not deliver `--json` as a subcommand flag. Real grok 1.0.62 has no `--json` on `sessions`, `sessions list`, or `models`.
-   - Whenever a token or boundary is ambiguous (an unknown short-flag cluster, an unknown flag after a subcommand, an unverified variadic boundary, an unparsed option when `grok --help` is unavailable, or any tracked run that is not a fully classified prompt or session-resume), the router **fails closed**:
+   - `write: false` is an allow-list, the same way untracked is. It is recorded only when the argv exactly matches a fully parsed prompt or session-resume:
+     1. every option before `--` is a known grammar option, and every value-taking option has its value,
+     2. `--tools` is present and every listed tool is read-only,
+     3. the shape is a prompt or session-resume (`-p` / `--single`, `--prompt-file`, `--resume` / `-r`, or `--continue` / `-c`),
+     4. there is no positional token before `--`.
+   - Tokens after `--` are literal payload and do not by themselves leave that allow-list. Anything else records `write: "unknown"`, including a positional grok subcommand, a mixed shape (`--tools read_file -p hi doctor fix`, `-c doctor fix`, `-p hi sessions delete X`), a positional prompt, and any unparsed option. A fully parsed prompt whose `--tools` include a non-read-only tool still records `write: true`, as do `--always-approve` and `--yolo` on that same fully parsed shape.
+   - A mutating shape requires `--allow-mutating` whether it is bare or mixed with a prompt or resume. That is `MUTATING_COMMANDS` (`login`, `logout`, `plugin`, `mcp`, `setup`, `update`, `memory`, `worktree`, `clone`) plus the sub-actions `doctor fix`, `sessions delete`, and `sessions restore`. Help-only shapes do not. The gate classifies; it does not rewrite argv.
+   - Whenever a token or boundary is ambiguous (an unknown short-flag cluster, an unknown flag after a subcommand, an unverified variadic boundary, or an unparsed option when `grok --help` is unavailable), the router **fails closed**:
      - It does **not** guess that the run is `helpOnly: true` (so the run is tracked as a job rather than silently dropped).
-     - It does **not** guess that `write` is `false`. `write: false` is recorded only for a fully classified prompt or session-resume whose `--tools` list is read-only. A dash token after a subcommand is stored as a positional (option parsing has stopped), and that unparsed option, an unclassified command, or any other tracked non-prompt shape records `write: "unknown"`. Mutating commands and `--always-approve` / `--yolo` still record `write: true`. `cli --tools read_file sessions --future-flag` is the case this rule closes.
+     - It does **not** guess that `write` is `false` outside the allow-list above. `-h` and `-v` are help or version only when the grammar built from `grok --help` gives them that canonical meaning, not because of their spelling.
      - In `discoverGrokControls`, canonical flag identity and policy/danger classification (`POLICY_OWNED_OPTIONS`) are anchored on the declared header `long` flag so no alias can ever demote a policy-owned flag into `safe-forward`.
 
 #### Read-only allow-list evidence
 
-This environment has no `grok` binary, so these rows were not re-checked with a live `grok <cmd> --help`. The command lines are the `Commands:` section of `tests/fixtures/grok-help.txt`, which is the help text the classifier and the round-3 fake-grok run use. The round-3 triage confirmed that real grok 1.0.62 has the same names, and that `grok agent --help` and `grok cursor-worker --help` match the rows removed below. Public notes are cited only where they agree with that fixture.
+The round-4 triage measured these bare commands on real grok 1.0.62 under a sandbox that denied network, writes under the home directory, and the pasteboard. The one-line descriptions are still the `Commands:` section of `tests/fixtures/grok-help.txt`.
 
 Kept (bare argv only; any extra token is tracked):
 
 | Entry | Evidence | Why bare stays untracked |
 |---|---|---|
-| `completions` | Fixture: "Generate shell completion scripts (bash, zsh, fish, powershell, ...)". | Prints a script to stdout. It does not install the script or edit a shell rc. `cli completions zsh` has an extra token and is tracked. |
-| `doctor` | Fixture: "Check terminal, clipboard, color, and input support without starting Grok". `doctor fix` applies fixes. | Bare `doctor` prints a report and does not start Grok. `fix` is an extra token, so `cli doctor fix` is tracked. |
-| `du`, `disk-usage` | Fixture: "Show what the grok home (~/.grok) uses on disk [aliases: disk-usage]". | Read-only disk report. The alias is its own argv token, so both names are in the set. `cli du --json` is rejected because `--json` is router-owned. |
-| `help` | Fixture: "Print this message or the help of the given subcommand(s)". | Prints help. `help <known command>` is allow-list shape 2. `help <unknown>` is tracked. |
-| `inspect` | Fixture: "Show the configuration Grok discovers for this directory" (rules, skills, plugins, hooks, MCP). | Local discovery report. An extra flag is tracked, and `--json` is rejected as router-owned. |
-| `models` | Fixture: "List available models and exit". The round-3 gate's passing check is bare `cli models` untracked. | Lists models and exits. It does not run a prompt, edit config, or register anything. |
-| `sessions` | Fixture: "List, search, or restore sessions". Current docs name `sessions list`, `search`, and `delete`. | Bare `sessions` is the list/parent form. `list`, `search`, `delete`, and `restore` are extra tokens, so those shapes are tracked. Native flags such as `--limit` are tracked, not rejected. |
-| `usage` | Fixture: "Print persisted token and cost usage for a session". | Prints persisted local usage. `cli usage <session-id>` has an extra token and is tracked. |
-| `version`, `v` | Fixture: "Print version information [aliases: v]". | Prints the version. Bare `cli --version` and `cli -v` are allow-list shape 1. |
+| `completions` | Fixture: "Generate shell completion scripts (bash, zsh, fish, powershell, ...)". Real grok 1.0.62 exits 2 when run bare because it needs `<SHELL>`. | Bare `completions` does not install a script or edit a shell rc. `cli completions zsh` has an extra token and is tracked. |
+| `doctor` | Fixture: "Check terminal, clipboard, color, and input support without starting Grok". Real grok 1.0.62 exits 0 and prints a report. `doctor fix` applies fixes and requires `--allow-mutating`. | Bare `doctor` does not start Grok. `cli doctor fix` is tracked and refused without `--allow-mutating`. |
+| `help` | Fixture: "Print this message or the help of the given subcommand(s)". Real grok 1.0.62 exits 0. | Prints help. `help <known command>` is allow-list shape 2. `help <unknown>` is tracked. |
+| `inspect` | Fixture: "Show the configuration Grok discovers for this directory" (rules, skills, plugins, hooks, MCP). Real grok 1.0.62 exits 0 and prints a local config report. | Local discovery report. An extra flag is tracked, and `--json` is rejected as router-owned. |
+| `sessions` | Fixture: "List, search, or restore sessions". Real grok 1.0.62 exits 2 when run bare because it needs `list`, `search`, or `delete`. | Bare `sessions` does not delete or restore. `delete` and `restore` require `--allow-mutating`. `list` and `search` are tracked. Native flags such as `--limit` are tracked, not rejected. |
+| `usage` | Fixture: "Print persisted token and cost usage for a session". Real grok 1.0.62 exits 2 when run bare because it needs `SESSION_ID`. | Bare `usage` does not print or upload a session. `cli usage <session-id>` is tracked. |
+| `version`, `v` | Fixture: "Print version information [aliases: v]". Real grok 1.0.62 exits 0. | Prints the version. Bare `cli --version` and `cli -v` are allow-list shape 1 only while the help grammar maps those spellings to `--version`. |
 
 Removed from the bare set:
 
@@ -74,6 +79,8 @@ Removed from the bare set:
 | `leader` | Fixture: "Manage running leader processes". | Process control, not a print-only command. Not verified as free of `kill`, so it is not allow-listed. |
 | `export` | Fixture: "Export a session transcript as Markdown". `grok export [output]` can write a path or the clipboard. | Can mutate the filesystem or clipboard. |
 | `trace` | Fixture: "Export or upload session trace data". | Writes a trace export and can upload it. |
+| `models` | Fixture: "List available models and exit". Real grok 1.0.62, with network denied, prints a stale catalog (grok-4.6) instead of the live catalog (grok-4.7-build-fast) and logs a telemetry HTTP export error. | Uses the network and sends telemetry. No exception. |
+| `du`, `disk-usage` | Fixture: "Show what the grok home (~/.grok) uses on disk [aliases: disk-usage]". Real grok 1.0.62 exits 0, and the write-deny sandbox blocked an attempt to open `~/.grok/worktrees.db` for writing. `--clean` exists and is an extra token. | Attempts a sqlite write. No exception. The alias is tracked too. |
 
 ---
 
@@ -287,7 +294,7 @@ Removed from the bare set:
      b. A positional token is reached that is a known subcommand (`grammar.commandNames.has(token)`), e.g., `models`, `sessions`, `clone`, `wrap`, `help`.
    - **After a known subcommand (`inOptionPosition === false`, before `--`) (`R-D`, round-2 allow-list)**:
      - Recognized non-router tokens are pushed verbatim to `passthroughArgs`. Router-owned options are rejected anywhere they are not consumed, including after a subcommand and as `--flag=value`. Consumed forms are only `--cwd` / `-C`, `--timeout-ms`, `--allow-mutating`, `--allow-dangerous` (in option position), and `--raw-arg-string` as the first-position wrapper. `--raw-arg-string` and `--timeout` are in `CLI_REJECTED_ROUTER_OPTIONS`. Tokens after `--` stay literal. This supersedes the earlier rule that forwarded router-named flags such as `cli sessions --json`.
-     - **No `--help` scan across subcommand arguments (`R-D`)**: Because root help does not describe subcommand option arities, scanning subcommand arguments for `--help` could mistake a subcommand option's value (or `grok wrap` child arguments) for a help flag and suppress mutating classification. Instead, under Rule (2) (fail closed), a subcommand invocation is classified as `helpOnly: true` **only** when:
+     - **Help-only is a narrow shape (`R-D`)**: Because root help does not describe subcommand option arities, a general scan for the spelling `--help` or `-h` could mistake a subcommand option's value (or `grok wrap` child arguments) for a help flag and suppress mutating classification. `-h` counts as help only when the grammar's canonical for that spelling is `--help`. A subcommand invocation is classified as `helpOnly: true` **only** when:
        1. The subcommand itself is `"help"` (`first === "help"`), OR
        2. A top-level `--help` / `-h` option appeared *before* the subcommand, OR
        3. Every token after the subcommand `first` (with no `--` separator) is either a non-flag subcommand path token or `"--help"` / `"-h"` and at least one `"--help"` / `"-h"` is present (e.g., `cli clone --help`, `cli models -h`, or `cli mcp add --help`). If any other `-` flag appears after the subcommand (e.g. `cli login -x --help`), the classifier fails closed (`helpOnly: false`) so `mutating` is never suppressed. The untracked allow-list is stricter than this `helpOnly` flag for child-argv commands: `wrap` with any non-help token (`cli wrap echo hi --help`) is tracked even though those tokens are not dash flags.
