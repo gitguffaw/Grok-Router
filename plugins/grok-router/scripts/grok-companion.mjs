@@ -10,6 +10,7 @@ import {
   findPriorJobForContinue,
   findPriorJobForResume,
   handleCli,
+  reconcileCompletedResumeOf,
   resolveKnownSessionId
 } from "./lib/cli.mjs";
 import { createContextPack } from "./lib/context-pack.mjs";
@@ -383,7 +384,12 @@ async function runStoredJob(workspaceRoot, jobId, options = {}) {
           hooks.updateProcess(processRecord);
         }
     });
-  }, { env, processGroup: Boolean(options.backgroundWorker), trackChildProcess: !options.backgroundWorker });
+  }, {
+    env,
+    processGroup: Boolean(options.backgroundWorker),
+    trackChildProcess: !options.backgroundWorker,
+    reconcileResumeOf: (current, execution) => reconcileCompletedResumeOf(workspaceRoot, current, execution, env)
+  });
 }
 
 async function handleInternalRun(argv) {
@@ -425,9 +431,12 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
       options.resume = sessionId;
     }
   }
+  const linkage = (options.resume || options.continue)
+    ? (options["fork-session"] ? "fork" : (options.resume && options.resume !== true ? "resume" : "continue"))
+    : null;
   const priorJob = options.resume && options.resume !== true
     ? findPriorJobForResume(workspaceRoot, options.resume, env)
-    : (options.continue ? findPriorJobForContinue(workspaceRoot, cwd, env) : null);
+    : (options.continue ? findPriorJobForContinue(workspaceRoot, workspaceRoot, env) : null);
   const resumedByJobId = Boolean(priorJob && options.resume === priorJob.id);
   const priorSessionId = resumedByJobId ? resolveKnownSessionId(workspaceRoot, priorJob, env) : null;
   if (resumedByJobId && !priorSessionId) {
@@ -470,11 +479,13 @@ async function runRouted(mode, { options, positionals }, { nativeControls } = {}
     title: request.userRequest.slice(0, 96),
     summary: request.userRequest.slice(0, 96),
     cwd,
+    executionCwd: workspaceRoot,
     workspaceRoot,
     status: "queued",
     phase: options.background ? "background" : "queued",
     write: request.write,
     request,
+    linkage,
     resumeOf,
     grokSessionId: null,
     contextPack,

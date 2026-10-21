@@ -546,6 +546,46 @@ export function rewriteResumeArg(passthroughArgs, resumeToken, sessionId) {
   return args;
 }
 
+const SUCCESSFUL_JOB_STATUSES = new Set(["completed", "completed-with-warnings"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function effectiveExecutionCwd(job) {
+  if (job?.executionCwd) {
+    return path.resolve(job.executionCwd);
+  }
+  if (job?.mode === "cli") {
+    return path.resolve(job.cwd ?? job.workspaceRoot ?? process.cwd());
+  }
+  return path.resolve(job?.workspaceRoot ?? job?.cwd ?? process.cwd());
+}
+
+function compareCandidatesNewestFirst(left, right) {
+  const leftDone = Date.parse(left.completedAt ?? left.updatedAt ?? "");
+  const rightDone = Date.parse(right.completedAt ?? right.updatedAt ?? "");
+  if (Number.isFinite(leftDone) && Number.isFinite(rightDone) && leftDone !== rightDone) {
+    return rightDone - leftDone;
+  }
+  const leftCreated = Date.parse(left.createdAt ?? "");
+  const rightCreated = Date.parse(right.createdAt ?? "");
+  if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {
+    return rightCreated - leftCreated;
+  }
+  return String(right.id ?? "").localeCompare(String(left.id ?? ""));
+}
+
+function matchesSessionNonContradictory(job, sessionId) {
+  if (!job || !sessionId) {
+    return false;
+  }
+  if (job.grokSessionId === sessionId) {
+    return true;
+  }
+  if ((!job.grokSessionId || job.grokSessionId === "unknown") && UUID_RE.test(sessionId) && job.request?.controls?.resume === sessionId) {
+    return true;
+  }
+  return false;
+}
+
 export function findPriorJobForResume(workspaceRoot, target, env = process.env) {
   if (!target || target === true) {
     return null;
@@ -554,19 +594,31 @@ export function findPriorJobForResume(workspaceRoot, target, env = process.env) 
   if (!ref) {
     return null;
   }
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
+  const jobs = listJobs(workspaceRoot, env).sort(compareCandidatesNewestFirst);
+  const byId = jobs.find((job) => job.id === ref);
+  if (byId) {
+    return byId;
+  }
+  if (!UUID_RE.test(ref)) {
+    return null;
+  }
   return (
-    jobs.find((job) => job.id === ref) ??
-    jobs.find((job) => job.grokSessionId === ref) ??
+    jobs.find((job) => job.jobClass === "grok" && SUCCESSFUL_JOB_STATUSES.has(job.status) && matchesSessionNonContradictory(job, ref)) ??
     null
   );
 }
 
-export function findPriorJobForContinue(workspaceRoot, cwd, env = process.env) {
-  const normalizedCwd = path.resolve(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot, env));
+export function findPriorJobForContinue(workspaceRoot, executionCwd, env = process.env) {
+  const normalizedCwd = path.resolve(executionCwd);
+  const jobs = listJobs(workspaceRoot, env).sort(compareCandidatesNewestFirst);
   return (
-    jobs.find((job) => job.jobClass !== "grok-panel" && path.resolve(job.cwd ?? job.workspaceRoot ?? workspaceRoot) === normalizedCwd) ??
+    jobs.find(
+      (job) =>
+        job.jobClass === "grok" &&
+        SUCCESSFUL_JOB_STATUSES.has(job.status) &&
+        Boolean(job.grokSessionId && job.grokSessionId !== "unknown") &&
+        effectiveExecutionCwd(job) === normalizedCwd
+    ) ??
     null
   );
 }
@@ -594,6 +646,57 @@ export function resolveKnownSessionId(workspaceRoot, job, env = process.env) {
     }
   }
   return null;
+}
+
+function wouldFormCycle(candidate, currentJobId, jobById) {
+  const visited = new Set([currentJobId]);
+  let cursor = candidate;
+  while (cursor) {
+    if (visited.has(cursor.id)) {
+      return true;
+    }
+    visited.add(cursor.id);
+    cursor = cursor.resumeOf ? jobById.get(cursor.resumeOf) ?? null : null;
+  }
+  return false;
+}
+
+export function reconcileCompletedResumeOf(workspaceRoot, currentJob, execution, env = process.env) {
+  if (!currentJob || !SUCCESSFUL_JOB_STATUSES.has(execution?.jobStatus)) {
+    return currentJob?.resumeOf ?? null;
+  }
+  if (!currentJob.linkage || currentJob.linkage === "fork") {
+    return currentJob.resumeOf ?? null;
+  }
+  const reportedSessionId = typeof execution.payload?.parsedOutput?.sessionId === "string"
+    ? execution.payload.parsedOutput.sessionId.trim()
+    : null;
+  if (!reportedSessionId) {
+    return currentJob.resumeOf ?? null;
+  }
+  const allJobs = listJobs(workspaceRoot, env);
+  const jobById = new Map(allJobs.map((job) => [job.id, job]));
+  const upperBoundMs = Date.parse(currentJob.startedAt ?? currentJob.createdAt ?? "");
+  const matching = allJobs
+    .filter((cand) => {
+      if (cand.id === currentJob.id || cand.jobClass !== "grok" || !SUCCESSFUL_JOB_STATUSES.has(cand.status)) {
+        return false;
+      }
+      const candDoneMs = Date.parse(cand.completedAt ?? cand.updatedAt ?? "");
+      if (Number.isFinite(upperBoundMs) && Number.isFinite(candDoneMs) && candDoneMs > upperBoundMs) {
+        return false;
+      }
+      if (!matchesSessionNonContradictory(cand, reportedSessionId)) {
+        return false;
+      }
+      return !wouldFormCycle(cand, currentJob.id, jobById);
+    })
+    .sort(compareCandidatesNewestFirst);
+  const bestId = matching[0]?.id ?? null;
+  if (currentJob.resumeOf && currentJob.resumeOf === bestId) {
+    return currentJob.resumeOf;
+  }
+  return bestId;
 }
 
 export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
@@ -633,6 +736,9 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
   }
 
   const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const linkage = (meta.hasResumeFlag || meta.continue)
+    ? (meta.hasForkFlag ? "fork" : (meta.resume && meta.resume !== true ? "resume" : "continue"))
+    : null;
   const priorJob = meta.resume && meta.resume !== true
     ? findPriorJobForResume(workspaceRoot, meta.resume, env)
     : (meta.continue ? findPriorJobForContinue(workspaceRoot, cwd, env) : null);
@@ -679,11 +785,13 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
     title: userRequest.slice(0, 96),
     summary: userRequest.slice(0, 96),
     cwd,
+    executionCwd: cwd,
     workspaceRoot,
     status: "queued",
     phase: "queued",
     write,
     request,
+    linkage,
     resumeOf,
     grokSessionId: null,
     logFile,
@@ -708,7 +816,7 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
     const exitStatus = result.error ? 1 : (result.status ?? 1);
     const jobStatus = result.timedOut ? "failed" : exitStatus === 0 ? "completed" : "failed";
     const parsedSessionId = extractSessionId(parsed, result.stdout);
-    const sessionId = jobStatus === "completed" ? (parsedSessionId ?? "unknown") : null;
+    const sessionId = parsedSessionId ?? (jobStatus === "completed" ? "unknown" : null);
     const text = extractGrokText(parsed, result.stdout);
     return {
       exitStatus,
@@ -730,7 +838,11 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
       },
       rendered: (text || result.stderr || (result.error ? result.error.message : `Grok exited ${exitStatus} with no result.`)).trimEnd()
     };
-  }, { env, trackChildProcess: true });
+  }, {
+    env,
+    trackChildProcess: true,
+    reconcileResumeOf: (current, execution) => reconcileCompletedResumeOf(workspaceRoot, current, execution, env)
+  });
 
   if (rawResult?.stdout) {
     process.stdout.write(rawResult.stdout);
