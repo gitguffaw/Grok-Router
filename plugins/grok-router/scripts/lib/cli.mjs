@@ -111,6 +111,8 @@ export function buildCliGrammar(helpInput = "") {
     }
   }
   const commandNames = new Set(FALLBACK_CLI_GRAMMAR.commands);
+  const canonicalCommand = new Map([...commandNames].map((name) => [name, name]));
+  const subactionCommands = new Set(MUTATING_SUBACTIONS.keys());
 
   function setArity(name, kind, isVariadic = false) {
     valueFlags.delete(name);
@@ -135,9 +137,24 @@ export function buildCliGrammar(helpInput = "") {
     for (const command of parsed.commands) {
       if (command.name) {
         commandNames.add(command.name);
+        canonicalCommand.set(command.name, command.name);
       }
       for (const alias of command.aliases ?? []) {
+        if (!alias) {
+          continue;
+        }
         commandNames.add(alias);
+        if (command.name) {
+          canonicalCommand.set(alias, command.name);
+        }
+      }
+      if (command.name && leadingSubactionVerbs(command.description).length > 0) {
+        subactionCommands.add(command.name);
+        for (const alias of command.aliases ?? []) {
+          if (alias) {
+            subactionCommands.add(alias);
+          }
+        }
       }
     }
     for (const flag of parsed.flags) {
@@ -162,9 +179,23 @@ export function buildCliGrammar(helpInput = "") {
     variadicFlags,
     canonicalFlag,
     commandNames,
+    canonicalCommand,
+    subactionCommands,
     mutatingCommands: MUTATING_COMMANDS,
     helpAvailable
   };
+}
+
+function leadingSubactionVerbs(description) {
+  const match = String(description ?? "").match(/^([A-Za-z][A-Za-z-]*(?:\s*,\s*(?:or\s+)?[A-Za-z][A-Za-z-]*)+)/);
+  if (!match) {
+    return [];
+  }
+  return match[1]
+    .toLowerCase()
+    .split(/\s*,\s*(?:or\s+)?|\s+or\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
 }
 
 function makeToken(kind, raw, { name = null, canonical = null, value = null, inline = false, passthroughIndex = 0, passthroughValueIndex = null } = {}) {
@@ -507,19 +538,24 @@ function positionalsBeforeSeparator(tokens) {
   return positionals;
 }
 
-function hasMutatingSubaction(positionals) {
-  for (let i = 0; i < positionals.length; i += 1) {
-    const actions = MUTATING_SUBACTIONS.get(positionals[i]);
-    if (!actions) {
-      continue;
-    }
-    for (let j = i + 1; j < positionals.length; j += 1) {
-      if (actions.has(positionals[j])) {
-        return true;
-      }
-    }
+function dispatchedPathMutating(positionals, grammar) {
+  const command = positionals[0];
+  if (!command || !grammar.commandNames.has(command)) {
+    return false;
   }
-  return false;
+  if (CHILD_ARGV_COMMANDS.has(command)) {
+    return false;
+  }
+  if (grammar.mutatingCommands.has(command)) {
+    return true;
+  }
+  const canonical = grammar.canonicalCommand?.get(command) ?? command;
+  if (!grammar.subactionCommands?.has(command) && !grammar.subactionCommands?.has(canonical)) {
+    return false;
+  }
+  const action = positionals[1];
+  const actions = MUTATING_SUBACTIONS.get(canonical) ?? MUTATING_SUBACTIONS.get(command);
+  return Boolean(action && actions && actions.has(action));
 }
 
 export function classifyCliTokens(tokens, grammar) {
@@ -562,10 +598,7 @@ export function classifyCliTokens(tokens, grammar) {
   }
   const helpOnly = !hasOpaqueOption && (hasTopLevelHelpOption || firstPositional === "help" || hasSubcommandHelpOnly);
   const beforeSeparator = positionalsBeforeSeparator(tokens);
-  const mutating = !helpOnly && (
-    beforeSeparator.some((name) => grammar.mutatingCommands.has(name)) ||
-    hasMutatingSubaction(beforeSeparator)
-  );
+  const mutating = !helpOnly && dispatchedPathMutating(beforeSeparator, grammar);
   const unclassified = !helpOnly && Boolean(
     firstToken &&
     !grammar.commandNames.has(firstToken) &&
