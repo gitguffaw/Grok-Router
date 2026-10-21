@@ -6,7 +6,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { shouldEmitLiveProgress, stripHostNoise } from "../plugins/grok-router/scripts/lib/render.mjs";
 import * as companionModule from "../plugins/grok-router/scripts/grok-companion.mjs";
 import { resolveJobFile, saveJob } from "../plugins/grok-router/scripts/lib/state.mjs";
-import { COMPANION, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
+import { COMPANION, helpText, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
 
 test("host only hears ready plus blocking startup errors", () => {
   assert.equal(shouldEmitLiveProgress("Ready to work."), true);
@@ -876,4 +876,121 @@ test("status renders Grok session as 'not reported' instead of 'unknown' when a 
   assert.equal(statusOut.status, 0, statusOut.stderr);
   assert.match(statusOut.stdout, /Grok session: not reported/);
   assert.equal(/Grok session: unknown/.test(statusOut.stdout), false);
+});
+
+test("[RED] T-A1a / R-C: cli -p '--help', cli -p 'hello' -- --help, and short clusters (-cp, -cphello, -cph, -rc, -cr=SID, -cC) are tracked and preserve original passthrough argv", () => {
+  const tempDir = makeTempDir();
+
+  const helpPromptRun = runCompanion(["cli", "-p", "--help", "--output-format", "json"], tempDir);
+  assert.equal(helpPromptRun.status, 0, helpPromptRun.stderr + helpPromptRun.stdout);
+  const helpPromptId = helpPromptRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(helpPromptId, "[RED] cli -p '--help' must be tracked as a job");
+  const helpPromptJob = JSON.parse(runCompanion(["result", "--json", helpPromptId], tempDir).stdout);
+  assert.equal(helpPromptJob.request.prompt, "--help", "[RED] stored prompt is --help");
+
+  const postDoubleDashHelp = runCompanion(["cli", "-p", "hello", "--", "--help"], tempDir);
+  assert.equal(postDoubleDashHelp.status, 0, postDoubleDashHelp.stderr + postDoubleDashHelp.stdout);
+  const postDashId = postDoubleDashHelp.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(postDashId, "[RED] cli -p 'hello' -- --help must be tracked as a job");
+
+  const clusterSeparate = runCompanion(["cli", "-cp", "hello", "--output-format", "json"], tempDir);
+  assert.equal(clusterSeparate.status, 0, clusterSeparate.stderr + clusterSeparate.stdout);
+  const clusterSeparateId = clusterSeparate.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(clusterSeparateId);
+  const clusterSeparateJob = JSON.parse(runCompanion(["result", "--json", clusterSeparateId], tempDir).stdout);
+  assert.equal(clusterSeparateJob.request.controls.continue, true, "[RED] -cp 'hello' sets continue === true");
+  assert.equal(clusterSeparateJob.request.prompt, "hello", "[RED] -cp 'hello' extracts prompt 'hello'");
+  assert.deepEqual(readArgv(tempDir).argv, ["-cp", "hello", "--output-format", "json"], "[GUARD] Rule (1): passthrough argv is not re-expanded");
+
+  const clusterAttached = runCompanion(["cli", "-cphello", "--output-format", "json"], tempDir);
+  assert.equal(clusterAttached.status, 0, clusterAttached.stderr + clusterAttached.stdout);
+  const clusterAttachedId = clusterAttached.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(clusterAttachedId, "[RED] -cphello must be tracked as a job");
+  const clusterAttachedJob = JSON.parse(runCompanion(["result", "--json", clusterAttachedId], tempDir).stdout);
+  assert.equal(clusterAttachedJob.request.controls.continue, true, "[RED] -cphello sets continue === true");
+  assert.equal(clusterAttachedJob.request.prompt, "hello", "[RED] -cphello extracts attached prompt 'hello'");
+  assert.deepEqual(readArgv(tempDir).argv, ["-cphello", "--output-format", "json"], "[GUARD] Rule (1): -cphello forwarded verbatim");
+
+  const clusterPromptH = runCompanion(["cli", "-cph", "--output-format", "json"], tempDir);
+  assert.equal(clusterPromptH.status, 0, clusterPromptH.stderr + clusterPromptH.stdout);
+  const clusterPromptHId = clusterPromptH.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(clusterPromptHId, "[RED] -cph is -c + -p 'h' (not -h help)");
+  const clusterPromptHJob = JSON.parse(runCompanion(["result", "--json", clusterPromptHId], tempDir).stdout);
+  assert.equal(clusterPromptHJob.request.controls.continue, true);
+  assert.equal(clusterPromptHJob.request.prompt, "h");
+
+  const clusterRc = runCompanion(["cli", "-rc", "-p", "resume title c", "--output-format", "json"], tempDir);
+  assert.equal(clusterRc.status, 0, clusterRc.stderr + clusterRc.stdout);
+  const clusterRcId = clusterRc.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(clusterRcId);
+  const clusterRcJob = JSON.parse(runCompanion(["result", "--json", clusterRcId], tempDir).stdout);
+  assert.equal(clusterRcJob.request.controls.resume, "c", "[RED] -rc is -r with attached value 'c'");
+  assert.equal(clusterRcJob.request.controls.continue, false, "[RED] -rc does not set continue");
+
+  const sid = "55555555-5555-4555-8555-555555555555";
+  const clusterCrEq = runCompanion(["cli", `-cr=${sid}`, "-p", "resume sid", "--output-format", "json"], tempDir);
+  assert.equal(clusterCrEq.status, 0, clusterCrEq.stderr + clusterCrEq.stdout);
+  const clusterCrEqId = clusterCrEq.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  assert.ok(clusterCrEqId);
+  const clusterCrEqJob = JSON.parse(runCompanion(["result", "--json", clusterCrEqId], tempDir).stdout);
+  assert.equal(clusterCrEqJob.request.controls.continue, true, "[RED] -cr=SID sets continue === true");
+  assert.equal(clusterCrEqJob.request.controls.resume, sid, "[RED] -cr=SID sets resume === SID");
+
+  const clusterWithRouterC = runCompanion(["cli", "-cC", "-p", "opaque C in cluster", "--output-format", "json"], tempDir);
+  assert.equal(clusterWithRouterC.status, 0, clusterWithRouterC.stderr + clusterWithRouterC.stdout);
+  assert.ok(readArgv(tempDir).argv.includes("-cC"), "[GUARD] -C inside a cluster is opaque and forwarded untouched");
+});
+
+test("[RED] T-A1b / A-G / A-I / R-D: cli tokenizer uses live grok --help for new value/variadic flags and stops rejecting router-named flags after a subcommand", () => {
+  const tempDir = makeTempDir();
+  const customFixtures = path.join(tempDir, "custom-fixtures");
+  fs.mkdirSync(customFixtures, { recursive: true });
+  for (const name of fs.readdirSync(path.join( path.dirname(COMPANION), "..", "..", "..", "tests", "fixtures"))) {
+    const src = path.join(path.dirname(COMPANION), "..", "..", "..", "tests", "fixtures", name);
+    if (fs.statSync(src).isFile()) {
+      fs.copyFileSync(src, path.join(customFixtures, name));
+    }
+  }
+  fs.writeFileSync(
+    path.join(customFixtures, "grok-help.txt"),
+    helpText({
+      flags: `
+      --custom-filter <EXPR>
+          Filter expression
+      --extra-files <FILE>...
+          Variadic files
+`
+    }),
+    "utf8"
+  );
+
+  const checkHelp = runCompanion(["cli", "--help"], tempDir, { GROK_FAKE_FIXTURES: customFixtures });
+  assert.equal(checkHelp.status, 0, "[SETUP] cli --help succeeds with injected fixture");
+  assert.match(checkHelp.stdout, /--custom-filter <EXPR>/, "[SETUP] injected --custom-filter is served by fake grok");
+
+  const withLiveValueFlag = runCompanion(
+    ["cli", "--custom-filter", "--best", "-p", "hello", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_FIXTURES: customFixtures }
+  );
+  assert.equal(withLiveValueFlag.status, 0, `[RED] --custom-filter --best must not reject --best: ${withLiveValueFlag.stderr}`);
+  assert.match(withLiveValueFlag.stderr, /Job ID:\s+\S+/, "[RED] job is tracked");
+
+  const withVariadicFlag = runCompanion(
+    ["cli", "--extra-files", "a.txt", "b.txt", "-p", "hello", "--output-format", "json"],
+    tempDir,
+    { GROK_FAKE_FIXTURES: customFixtures }
+  );
+  assert.equal(withVariadicFlag.status, 0, `[RED] variadic <FILE>... consumes values up to next flag: ${withVariadicFlag.stderr}`);
+  const varId = withVariadicFlag.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+  const varJob = JSON.parse(runCompanion(["result", "--json", varId], tempDir).stdout);
+  assert.equal(varJob.request.prompt, "hello", "[RED] variadic values do not leak into positional prompt");
+
+  const subcommandWithJson = runCompanion(["cli", "sessions", "--json"], tempDir);
+  assert.equal(subcommandWithJson.status, 0, `[RED] router-named flag after subcommand must be forwarded, not rejected: ${subcommandWithJson.stderr}`);
+  assert.deepEqual(readArgv(tempDir).argv, ["sessions", "--json"]);
+
+  const mutatingSubcommandWithFlagAndHelp = runCompanion(["cli", "login", "--some-opt", "--help"], tempDir);
+  assert.notEqual(mutatingSubcommandWithFlagAndHelp.status, 0, "[RED] Rule (2) fail-closed: unknown flag before --help on mutating subcommand still requires --allow-mutating");
+  assert.match(mutatingSubcommandWithFlagAndHelp.stderr, /--allow-mutating/);
 });
