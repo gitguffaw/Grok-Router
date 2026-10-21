@@ -1192,3 +1192,18 @@ test("[RED] M2: result <id> --lane 0 and status <id> --json honor options placed
   const statusPayload = JSON.parse(statusOut.stdout);
   assert.equal(statusPayload.id, panel.id, "[RED] M2: status <id> --json outputs JSON");
 });
+
+test("[RED] C1 / Rule 1: a single cli argv element containing spaces is never implicitly split, while --raw-arg-string still splits slash-command input", () => {
+  const tempDir = makeTempDir();
+  const singleElementSpace = runCompanion(["cli", "sessions --json"], tempDir);
+  assert.notEqual(singleElementSpace.status, 0, "[RED] C1: single token 'sessions --json' is not split into subcommand 'sessions'");
+  assert.match(singleElementSpace.stderr, /--allow-mutating/, "[RED] C1: single token 'sessions --json' is treated as one unclassified token");
+
+  const allowedSingleToken = runCompanion(["cli", "--allow-mutating", "sessions --json"], tempDir);
+  assert.equal(allowedSingleToken.status, 0, allowedSingleToken.stderr + allowedSingleToken.stdout);
+  assert.deepEqual(readArgv(tempDir).argv, ["sessions --json"], "[RED] C1: single argv element containing space reaches grok as one element");
+
+  const rawArgString = runCompanion(["cli", "--raw-arg-string", "sessions --json"], tempDir);
+  assert.equal(rawArgString.status, 0, rawArgString.stderr + rawArgString.stdout);
+  assert.deepEqual(readArgv(tempDir).argv, ["sessions", "--json"], "[GUARD] --raw-arg-string explicitly splits raw slash-command strings");
+});
