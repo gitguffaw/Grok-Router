@@ -1432,8 +1432,8 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
         || (tail[0] === "sessions" && (tail[1] === "delete" || tail[1] === "restore"));
       if (jobId) {
         const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, jobId, env), "utf8"));
-        if (job.write === false || job.request?.write === false) {
-          mixedFalseWrite.push(args.join(" "));
+        if (job.write !== "unknown" || job.request?.write !== "unknown") {
+          mixedFalseWrite.push(`${args.join(" ")} write:${JSON.stringify(job.write)}`);
         }
       } else if (!mutating) {
         mixedMissingJob.push(args.join(" "));
@@ -1543,7 +1543,7 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
   assert.equal(
     mixedFalseWrite.length + mixedNotRefused.length + mixedMissingJob.length + payloadRefused.length + payloadMissingJob.length + payloadBadWrite.length,
     0,
-    `[RED] Y1: ${mixedFalseWrite.length} of 90 prompt/resume shapes recorded write:false (${sample(mixedFalseWrite)}); ${mixedNotRefused.length} mutating shapes were not refused (${sample(mixedNotRefused)}); ${mixedMissingJob.length} shapes created no job (${sample(mixedMissingJob)}); ${payloadRefused.length} payload shapes were refused (${sample(payloadRefused)}); ${payloadMissingJob.length} payload shapes created no job (${sample(payloadMissingJob)}); ${payloadBadWrite.length} payload shapes recorded a write other than unknown (${sample(payloadBadWrite)})`
+    `[RED] Y1: ${mixedFalseWrite.length} of 90 prompt/resume shapes recorded a write other than "unknown" (${sample(mixedFalseWrite)}); ${mixedNotRefused.length} mutating shapes were not refused (${sample(mixedNotRefused)}); ${mixedMissingJob.length} shapes created no job (${sample(mixedMissingJob)}); ${payloadRefused.length} payload shapes were refused (${sample(payloadRefused)}); ${payloadMissingJob.length} payload shapes created no job (${sample(payloadMissingJob)}); ${payloadBadWrite.length} payload shapes recorded a write other than unknown (${sample(payloadBadWrite)})`
   );
 });
 
@@ -1715,6 +1715,124 @@ test("[RED] Z1: payload after the dispatched command is tracked and not refused"
     }
   }
   assert.equal(problems.length, 0, `[RED] Z1: ${problems.join(" || ")}`);
+});
+
+test("[RED] Z2: a positional prompt before every mutating command or sub-action is refused", () => {
+  const tempDir = makeTempDir();
+  const prefixes = [
+    [],
+    ["-c"],
+    ["-m", "grok-4"],
+    ["--tools", "read_file"]
+  ];
+  const tails = [
+    ["login"],
+    ["logout"],
+    ["plugin"],
+    ["mcp"],
+    ["setup"],
+    ["update"],
+    ["memory"],
+    ["worktree"],
+    ["clone"],
+    ["doctor", "fix"],
+    ["sessions", "delete", "X"],
+    ["sessions", "restore", "X"]
+  ];
+  assert.equal(prefixes.length * tails.length, 48, "[SETUP] prompt-then-command matrix is 48 shapes");
+  const problems = [];
+  for (const prefix of prefixes) {
+    for (const tail of tails) {
+      const args = [...prefix, "hello", ...tail];
+      const res = runCompanion(["cli", ...args], tempDir);
+      const label = args.join(" ");
+      const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+      if (res.status === 0 || !/--allow-mutating/.test(res.stderr) || jobId) {
+        problems.push(label);
+      }
+    }
+  }
+  assert.equal(
+    problems.length,
+    0,
+    `[RED] Z2: ${problems.length} prompt-then-command shapes were not refused (${problems.slice(0, 8).join(" || ")})`
+  );
+});
+
+test("[RED] Z3: a prompt or an unknown option before a mutating sub-action is refused, and known payload stays tracked", () => {
+  const tempDir = makeTempDir();
+  const refused = [
+    ["-c", "hello", "doctor", "fix"],
+    ["--tools", "read_file", "hello", "doctor", "fix"],
+    ["-m", "grok-4", "hello", "doctor", "fix"],
+    ["-c", "hello", "login"],
+    ["-m", "grok-4", "hello", "sessions", "delete", "X"],
+    ["--tools", "read_file", "hello", "mcp", "add", "x"],
+    ["sessions", "--future", "delete", "X"],
+    ["sessions", "-Z", "delete", "X"],
+    ["doctor", "--future", "fix"]
+  ];
+  const tracked = [
+    ["-c", "hello", "wrap", "echo", "login"],
+    ["wrap", "echo", "login"],
+    ["wrap", "git", "clone", "x"],
+    ["sessions", "search", "delete"],
+    ["sessions", "search", "login"],
+    ["usage", "login"],
+    ["-c", "hello", "version"]
+  ];
+  const problems = [];
+  for (const args of refused) {
+    const argvPath = path.join(tempDir, "argv.json");
+    if (fs.existsSync(argvPath)) {
+      fs.unlinkSync(argvPath);
+    }
+    const label = args.join(" ");
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (res.status === 0 || !/--allow-mutating/.test(res.stderr) || jobId) {
+      problems.push(`${label} was not refused`);
+    }
+    const allowed = runCompanion(["cli", "--allow-mutating", ...args], tempDir);
+    const allowedId = allowed.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (!allowedId) {
+      problems.push(`--allow-mutating ${label} was not tracked`);
+    } else {
+      const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, allowedId, testEnv(tempDir)), "utf8"));
+      if (job.write !== "unknown" || job.request?.write !== "unknown") {
+        problems.push(`--allow-mutating ${label} write ${JSON.stringify(job.write)}`);
+      }
+      const recorded = readArgv(tempDir)?.argv ?? [];
+      if (JSON.stringify(recorded) !== JSON.stringify(args)) {
+        problems.push(`--allow-mutating ${label} argv ${JSON.stringify(recorded)}`);
+      }
+    }
+  }
+  for (const args of tracked) {
+    const argvPath = path.join(tempDir, "argv.json");
+    if (fs.existsSync(argvPath)) {
+      fs.unlinkSync(argvPath);
+    }
+    const label = args.join(" ");
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (res.status !== 0 || /--allow-mutating/.test(res.stderr)) {
+      problems.push(`${label} was refused`);
+    }
+    if (!jobId) {
+      problems.push(`${label} created no job`);
+      continue;
+    }
+    const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, jobId, testEnv(tempDir)), "utf8"));
+    if (job.write !== "unknown" || job.request?.write !== "unknown") {
+      problems.push(`${label} write ${JSON.stringify(job.write)}`);
+    }
+    const recorded = readArgv(tempDir)?.argv ?? [];
+    if (JSON.stringify(recorded) !== JSON.stringify(args)) {
+      problems.push(`${label} argv ${JSON.stringify(recorded)}`);
+    }
+  }
+  assert.equal(problems.length, 0, `[RED] Z3: ${problems.join(" || ")}`);
 });
 
 test("[RED] Y2: bare models, du, and disk-usage are tracked", () => {
