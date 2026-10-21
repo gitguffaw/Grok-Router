@@ -1142,3 +1142,31 @@ test("[RED] T-C2 / A-E / R-E / R-H: J3 -r S links to plain-output J2, title-base
   assert.equal(cliFailedJob.status, "failed");
   assert.equal(cliFailedJob.grokSessionId, failedPartialSid, "[RED] R-H: cli failed job preserves reported grokSessionId when grok emitted one");
 });
+
+test("[RED] M1: router job IDs inside short clusters or inline -r= are refused (fail closed) while standalone -r/--resume/--resume= translate", () => {
+  const tempDir = makeTempDir();
+  const sid = "99999999-9999-4999-8999-999999999991";
+  const turn1 = runCompanion(["analyze", "--json", "Start session for M1"], tempDir, { GROK_FAKE_SESSION: sid });
+  assert.equal(turn1.status, 0, "[SETUP] turn 1 succeeds");
+  const jobId = JSON.parse(turn1.stdout).id;
+
+  for (const clusterArgs of [
+    [`-r=${jobId}`],
+    [`-cr=${jobId}`],
+    ["-cr", jobId],
+    [`-r${jobId}`]
+  ]) {
+    const bad = runCompanion(["cli", ...clusterArgs, "-p", "Should fail closed"], tempDir);
+    assert.notEqual(bad.status, 0, `[RED] M1: ${clusterArgs.join(" ")} must be refused`);
+    assert.match(bad.stderr, /standalone/i, `[RED] M1: ${clusterArgs.join(" ")} error explains standalone requirement`);
+  }
+
+  for (const standaloneArgs of [
+    ["-r", jobId],
+    ["--resume", jobId],
+    [`--resume=${jobId}`]
+  ]) {
+    const ok = runCompanion(["cli", ...standaloneArgs, "-p", "Allowed standalone translation", "--output-format", "json"], tempDir);
+    assert.equal(ok.status, 0, `[GUARD] standalone ${standaloneArgs.join(" ")} succeeds: ${ok.stderr}`);
+  }
+});
