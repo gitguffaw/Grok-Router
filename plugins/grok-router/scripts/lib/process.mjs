@@ -6,6 +6,7 @@ const DEFAULT_STOP_HARD_TIMEOUT_MS = 8000;
 const DEFAULT_STOP_POLL_MS = 50;
 
 export function runCommand(command, args = [], options = {}) {
+  const timeoutMs = Number(options.timeoutMs);
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
@@ -13,17 +14,20 @@ export function runCommand(command, args = [], options = {}) {
     input: options.input,
     maxBuffer: options.maxBuffer ?? 20 * 1024 * 1024,
     stdio: options.stdio ?? "pipe",
+    timeout: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined,
     shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
     windowsHide: true
   });
+  const timedOut = result.error?.code === "ETIMEDOUT";
   return {
     command,
     args,
-    status: result.status ?? 0,
+    status: result.status ?? (result.error || result.signal ? 1 : 0),
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
-    error: result.error ?? null
+    error: result.error ?? null,
+    timedOut
   };
 }
 

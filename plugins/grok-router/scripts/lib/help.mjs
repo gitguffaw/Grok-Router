@@ -21,13 +21,16 @@ function parseDefault(text) {
 }
 
 function parseAliases(text) {
-  const match = String(text ?? "").match(/\[aliases:\s*([^\]]+)\]/i);
-  if (!match) {
-    return [];
+  const raw = String(text ?? "");
+  const collected = [];
+  for (const bracket of raw.matchAll(/\[aliases:\s*([^\]]+)\]/gi)) {
+    collected.push(...bracket[1].split(","));
+  }
+  for (const compat of raw.matchAll(/\(compat alias(?:es)?:\s*([^)]+)\)/gi)) {
+    collected.push(...compat[1].split(","));
   }
   return unique(
-    match[1]
-      .split(",")
+    collected
       .map((item) => item.trim())
       .filter(Boolean)
   );
@@ -35,20 +38,32 @@ function parseAliases(text) {
 
 function parseFlagLine(line) {
   const match = line.match(
-    /^\s{2,}(?:(-[A-Za-z0-9]),\s*)?(--[a-z0-9][a-z0-9-]*)(?:\s+(<[^>]+>|\[\s*<[^>]+>\s*\]))?/i
+    /^\s{2,}(?:(?:(-[A-Za-z0-9]),\s*)?(--[A-Za-z0-9][A-Za-z0-9-]*)|(-[A-Za-z0-9]))(?:(?:\s+|=)(<[^>]+>(?:\.\.\.)?|\[\s*(?:=\s*)?<[^>]+>(?:\.\.\.)?\s*\])|(\[\s*=\s*<[^>]+>(?:\.\.\.)?\s*\]))?(?:\s{2,}(.+))?$/
   );
   if (!match) {
     return null;
   }
-  const valueToken = match[3] ?? "";
+  const short = match[1] ?? match[3] ?? null;
+  const long = match[2] ?? null;
+  const valueToken = match[4] ?? match[5] ?? "";
+  const inlineDescription = (match[6] ?? "").trim();
   const optionalValue = valueToken.startsWith("[");
-  const valueHint = valueToken.replace(/^[\[<]\s*/, "").replace(/\s*[\]>]$/, "").replace(/^<|>$/g, "") || null;
+  const variadic = /\.\.\.(?:\s*\])?$/.test(valueToken);
+  const rawHint = valueToken
+    .replace(/^\[\s*=?\s*/, "")
+    .replace(/\s*\]$/, "")
+    .replace(/\.\.\.$/, "")
+    .replace(/^<|>$/g, "")
+    .trim();
+  const valueHint = rawHint || null;
   return {
-    short: match[1] ?? null,
-    long: match[2],
+    short,
+    long,
     valueHint,
     optionalValue,
-    requiresValue: Boolean(valueHint) && !optionalValue
+    requiresValue: Boolean(valueHint) && !optionalValue,
+    variadic,
+    inlineDescription
   };
 }
 
@@ -106,15 +121,22 @@ export function parseGrokHelp(text) {
     if (section === "options" || /^\s{2,}(?:-[A-Za-z0-9],\s*)?--[a-z0-9]/.test(line)) {
       const flag = parseFlagLine(line);
       if (flag) {
+        const { inlineDescription, ...flagMeta } = flag;
+        const inlineAliases = parseAliases(inlineDescription).filter((alias) => alias.startsWith("-"));
         currentFlag = {
-          ...flag,
-          names: unique([flag.long, flag.short]),
-          aliases: [],
-          description: "",
-          possibleValues: [],
-          default: null
+          ...flagMeta,
+          names: unique([flag.long, flag.short, ...inlineAliases]),
+          aliases: inlineAliases,
+          description: inlineDescription,
+          possibleValues: parsePossibleValues(inlineDescription),
+          default: parseDefault(inlineDescription)
         };
         flags.push(currentFlag);
+        continue;
+      }
+      if (section === "options" && /^\s{2,6}-\S/.test(line)) {
+        parseWarnings.push(`unparsed option line: ${trimmed}`);
+        currentFlag = null;
         continue;
       }
     }
