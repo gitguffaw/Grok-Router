@@ -30,10 +30,11 @@ const MUTATING_COMMANDS = new Set([
 ]);
 
 const READ_ONLY_CLI_SUBCOMMANDS = new Set([
-  "agent", "completions", "cursor-worker", "dashboard", "doctor", "du", "disk-usage",
-  "export", "help", "inspect", "leader", "models", "sessions", "trace", "usage",
-  "version", "v", "wrap"
+  "completions", "doctor", "du", "disk-usage", "help", "inspect", "models", "sessions",
+  "usage", "version", "v"
 ]);
+
+const CHILD_ARGV_COMMANDS = new Set(["wrap"]);
 
 const FALLBACK_CLI_GRAMMAR = {
   valueFlags: [
@@ -209,7 +210,10 @@ function isConsumedRouterForm(token, key, inOptionPosition) {
 }
 
 function normalizeCliArgv(argv) {
-  if (argv[0] === "--raw-arg-string" && argv.length === 2) {
+  if (argv[0] === "--raw-arg-string") {
+    if (argv.length !== 2) {
+      throw new Error("--raw-arg-string requires exactly one following token: the raw argument string");
+    }
     return splitRawArgumentString(argv[1]);
   }
   return argv;
@@ -543,6 +547,10 @@ export function isUntrackedCliAllowList(tokens, grammar) {
     const token = tokens[0];
     return token.kind === "option" && (token.canonical === "--help" || token.name === "--help" || token.name === "-h");
   }
+  if (raw.length === 1 && (raw[0] === "--version" || raw[0] === "-v")) {
+    const token = tokens[0];
+    return token.kind === "option" && (token.canonical === "--version" || token.name === "--version" || token.name === "-v");
+  }
   if (
     raw.length === 1 &&
     grammar.commandNames.has(raw[0]) &&
@@ -554,7 +562,13 @@ export function isUntrackedCliAllowList(tokens, grammar) {
     return false;
   }
   const rest = raw.slice(1);
+  if (raw[0] === "help" && rest.length > 0 && rest.every((token) => grammar.commandNames.has(token))) {
+    return true;
+  }
   if (!rest.length) {
+    return false;
+  }
+  if (CHILD_ARGV_COMMANDS.has(raw[0]) && rest.some((token) => token !== "--help" && token !== "-h")) {
     return false;
   }
   const helpCount = rest.filter((token) => token === "--help" || token === "-h").length;
@@ -562,6 +576,26 @@ export function isUntrackedCliAllowList(tokens, grammar) {
     return false;
   }
   return rest.every((token) => token === "--help" || token === "-h" || !token.startsWith("-"));
+}
+
+function hasUnparsedOption(tokens) {
+  let afterSeparator = false;
+  for (const token of tokens) {
+    if (token.kind === "separator") {
+      afterSeparator = true;
+      continue;
+    }
+    if (afterSeparator) {
+      continue;
+    }
+    if (token.kind === "option" && token.canonical === null) {
+      return true;
+    }
+    if (token.kind === "positional" && token.raw !== "-" && String(token.raw).startsWith("-")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function classifyCliArgs(args, helpText = "") {
@@ -896,9 +930,10 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
     : passthroughArgs;
   const resumeOf = priorJob?.id ?? null;
   const userRequest = (meta.prompt ?? args.join(" ")).trim();
+  const shapeUnclassified = hasUnparsedOption(tokens) || classification.unclassified || !meta.hasPromptOrResume;
   const write = (meta.hasAutoApproveFlag || Boolean(classification.mutating))
     ? true
-    : (meta.hasOpaqueOption ? "unknown" : classifyCliToolsWrite(meta.tools));
+    : (shapeUnclassified ? "unknown" : classifyCliToolsWrite(meta.tools));
   const jobId = generateJobId("cli");
   const logFile = createJobLogFile(workspaceRoot, jobId, "Grok CLI", env);
   const request = {

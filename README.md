@@ -54,7 +54,7 @@ Foreground is the default. Job ID and progress print on stderr as soon as the jo
 
 ## How it stays current
 
-Grok changes models and flags without a Router release. The companion reads `grok --help`, `grok models`, and `grok inspect --json` on this machine. New flags show up on `:surface`. Unclassified subcommands go through `:cli` (prompt and session-resume `cli` runs are tracked as router jobs, recording `write: "unknown"` when `--tools` is omitted). Untracked `cli` is an allow-list: bare `--help`/`-h`, `<known subcommand> --help`, and bare read-only subcommands such as `models`. Anything else is tracked.
+Grok changes models and flags without a Router release. The companion reads `grok --help`, `grok models`, and `grok inspect --json` on this machine. New flags show up on `:surface`. Unclassified subcommands go through `:cli` (prompt and session-resume `cli` runs are tracked as router jobs, recording `write: "unknown"` when `--tools` is omitted). Untracked `cli` is an allow-list: bare `--help`/`-h`, bare `--version`/`-v`, `help <known subcommand>`, `<known subcommand> --help`, and bare read-only subcommands such as `models`. Anything else is tracked. A router-owned flag name cannot be passed through to a grok subcommand.
 
 ## Policy
 
