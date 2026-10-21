@@ -12,6 +12,7 @@ import {
   readGrokHelp
 } from "./grok.mjs";
 import { parseGrokHelp } from "./help.mjs";
+import { ROUTER_OWNED_OPTIONS } from "./live-controls.mjs";
 import { appendLogLine, createJobLogFile, listJobs, runTrackedJob, sortJobsNewestFirst } from "./jobs.mjs";
 import { runProcess } from "./process.mjs";
 import { emitJobStarted } from "./render.mjs";
@@ -21,11 +22,17 @@ import { resolveCwd, resolveWorkspaceRoot } from "./workspace.mjs";
 const CLI_REJECTED_ROUTER_OPTIONS = new Set([
   "base", "scope", "tool", "lanes", "lane", "json", "background", "wait", "best",
   "lean", "full", "search", "docs", "parallel", "panel", "all", "write", "fresh",
-  "resume-last", "enable-review-gate", "disable-review-gate"
+  "resume-last", "enable-review-gate", "disable-review-gate", "raw-arg-string", "timeout"
 ]);
 
 const MUTATING_COMMANDS = new Set([
   "login", "logout", "plugin", "mcp", "setup", "update", "memory", "worktree", "clone"
+]);
+
+const READ_ONLY_CLI_SUBCOMMANDS = new Set([
+  "agent", "completions", "cursor-worker", "dashboard", "doctor", "du", "disk-usage",
+  "export", "help", "inspect", "leader", "models", "sessions", "trace", "usage",
+  "version", "v", "wrap"
 ]);
 
 const FALLBACK_CLI_GRAMMAR = {
@@ -168,11 +175,41 @@ function rejectionError(key, grammar) {
   );
 }
 
+function routerOptionKey(token) {
+  if (token === "-C") {
+    return "cwd";
+  }
+  if (!token.startsWith("--") || token === "--") {
+    return null;
+  }
+  const body = token.slice(2);
+  const eq = body.indexOf("=");
+  const key = eq === -1 ? body : body.slice(0, eq);
+  return key || null;
+}
+
+function isRouterControlledKey(key) {
+  return CLI_REJECTED_ROUTER_OPTIONS.has(key) || ROUTER_OWNED_OPTIONS.has(key);
+}
+
+function isConsumedRouterForm(token, key, inOptionPosition) {
+  if (!inOptionPosition) {
+    return false;
+  }
+  if (key === "cwd" && (token === "--cwd" || token === "-C" || token.startsWith("--cwd="))) {
+    return true;
+  }
+  if (key === "timeout-ms" && (token === "--timeout-ms" || token.startsWith("--timeout-ms="))) {
+    return true;
+  }
+  if ((key === "allow-mutating" || key === "allow-dangerous") && (token === `--${key}` || token.startsWith(`--${key}=`))) {
+    return true;
+  }
+  return false;
+}
+
 function normalizeCliArgv(argv) {
-  if (argv[0] === "--raw-arg-string") {
-    if (argv.length !== 2) {
-      throw new Error("--raw-arg-string requires exactly one following token: the raw argument string");
-    }
+  if (argv[0] === "--raw-arg-string" && argv.length === 2) {
     return splitRawArgumentString(argv[1]);
   }
   return argv;
@@ -280,6 +317,11 @@ export function tokenizeCliArgv(argv, grammar, { rejectRouterFlags = true } = {}
         tokens.push(makeToken("positional", posToken, { passthroughIndex: posIdx }));
       }
       break;
+    }
+
+    const routerKey = routerOptionKey(token);
+    if (rejectRouterFlags && routerKey && isRouterControlledKey(routerKey) && !isConsumedRouterForm(token, routerKey, inOptionPosition)) {
+      throw rejectionError(routerKey, grammar);
     }
 
     if (!inOptionPosition) {
@@ -487,6 +529,39 @@ export function classifyCliTokens(tokens, grammar) {
     firstPositional === firstToken
   );
   return { helpOnly, mutating, unclassified, first: firstToken };
+}
+
+export function isUntrackedCliAllowList(tokens, grammar) {
+  if (!tokens.length || tokens.some((token) => token.kind === "separator")) {
+    return false;
+  }
+  if (tokens.some((token) => token.kind === "option" && token.canonical === null)) {
+    return false;
+  }
+  const raw = tokens.map((token) => token.raw);
+  if (raw.length === 1 && (raw[0] === "--help" || raw[0] === "-h")) {
+    const token = tokens[0];
+    return token.kind === "option" && (token.canonical === "--help" || token.name === "--help" || token.name === "-h");
+  }
+  if (
+    raw.length === 1 &&
+    grammar.commandNames.has(raw[0]) &&
+    READ_ONLY_CLI_SUBCOMMANDS.has(raw[0])
+  ) {
+    return true;
+  }
+  if (!grammar.commandNames.has(raw[0])) {
+    return false;
+  }
+  const rest = raw.slice(1);
+  if (!rest.length) {
+    return false;
+  }
+  const helpCount = rest.filter((token) => token === "--help" || token === "-h").length;
+  if (helpCount < 1) {
+    return false;
+  }
+  return rest.every((token) => token === "--help" || token === "-h" || !token.startsWith("-"));
 }
 
 export function classifyCliArgs(args, helpText = "") {
@@ -785,7 +860,7 @@ export async function handleCli(argv, { runProcessImpl = runProcess } = {}) {
     ? managedTimeoutMs(routerOptions["timeout-ms"])
     : 0;
   const meta = extractCliMetadataFromTokens(tokens, cwd, grammar);
-  if (classification.helpOnly || !meta.hasPromptOrResume) {
+  if (isUntrackedCliAllowList(tokens, grammar)) {
     const invocation = grokInvocation(passthroughArgs, env);
     const result = await runProcessImpl(invocation.command, invocation.args, { cwd, env, timeoutMs });
     if (result.stdout) {

@@ -6,6 +6,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { shouldEmitLiveProgress, stripHostNoise } from "../plugins/grok-router/scripts/lib/render.mjs";
 import { handleCli, resolveKnownSessionId } from "../plugins/grok-router/scripts/lib/cli.mjs";
 import { resolveJobFile, resolveStateDir, saveJob } from "../plugins/grok-router/scripts/lib/state.mjs";
+import { buildCliGrammar } from "../plugins/grok-router/scripts/lib/cli.mjs";
 import { parseGrokHelp } from "../plugins/grok-router/scripts/lib/help.mjs";
 import { ROUTER_OWNED_OPTIONS } from "../plugins/grok-router/scripts/lib/live-controls.mjs";
 import { COMPANION, FIXTURES, helpText, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
@@ -730,7 +731,7 @@ test("cli -r <jobId> and managed --resume <jobId> fail clearly when the referenc
   assert.match(managedResumeUnknown.stderr, new RegExp(`job ${jobId} has no known Grok session`, "i"));
 });
 
-test("cli rejects router-only flags only in option position, never as flag values or after --", () => {
+test("cli rejects router-only flags as their own options, never as flag values or after --", () => {
   const tempDir = makeTempDir();
 
   const promptIsRouterFlag = runCompanion(["cli", "-p", "--best", "--output-format", "json"], tempDir);
@@ -905,7 +906,7 @@ test("[RED] T-A1a / R-C: cli -p '--help', cli -p 'hello' -- --help, and short cl
   assert.ok(readArgv(tempDir).argv.includes("-cC"), "[GUARD] -C inside a cluster is opaque and forwarded untouched");
 });
 
-test("[RED] T-A1b / A-G / A-I / R-D: cli tokenizer uses live grok --help for new value/variadic flags and stops rejecting router-named flags after a subcommand", () => {
+test("[RED] T-A1b / A-G / A-I / R-D: cli tokenizer uses live grok --help for new value/variadic flags and rejects router-owned options after a subcommand", () => {
   const tempDir = makeTempDir();
   const customFixtures = path.join(tempDir, "custom-fixtures");
   fs.mkdirSync(customFixtures, { recursive: true });
@@ -951,8 +952,8 @@ test("[RED] T-A1b / A-G / A-I / R-D: cli tokenizer uses live grok --help for new
   assert.equal(varJob.request.prompt, "hello", "[GUARD] variadic values with explicit -p keep prompt 'hello'");
 
   const subcommandWithJson = runCompanion(["cli", "sessions", "--json"], tempDir);
-  assert.equal(subcommandWithJson.status, 0, `[RED] router-named flag after subcommand must be forwarded, not rejected: ${subcommandWithJson.stderr}`);
-  assert.deepEqual(readArgv(tempDir).argv, ["sessions", "--json"]);
+  assert.notEqual(subcommandWithJson.status, 0, `[RED] router-owned --json after a subcommand is rejected: ${subcommandWithJson.stderr}`);
+  assert.match(subcommandWithJson.stderr, /--json is a router option/);
 
   const mutatingSubcommandWithFlagAndHelp = runCompanion(["cli", "login", "--some-opt", "--help"], tempDir);
   assert.notEqual(mutatingSubcommandWithFlagAndHelp.status, 0, "[RED] Rule (2) fail-closed: unknown flag before --help on mutating subcommand still requires --allow-mutating");
@@ -1205,9 +1206,9 @@ test("[RED] C1 / Rule 1: a single cli argv element containing spaces is never im
   assert.equal(allowedSingleToken.status, 0, allowedSingleToken.stderr + allowedSingleToken.stdout);
   assert.deepEqual(readArgv(tempDir).argv, ["sessions --json"], "[RED] C1: single argv element containing space reaches grok as one element");
 
-  const rawArgString = runCompanion(["cli", "--raw-arg-string", "sessions --json"], tempDir);
+  const rawArgString = runCompanion(["cli", "--raw-arg-string", "doctor --debug"], tempDir);
   assert.equal(rawArgString.status, 0, rawArgString.stderr + rawArgString.stdout);
-  assert.deepEqual(readArgv(tempDir).argv, ["sessions", "--json"], "[GUARD] --raw-arg-string explicitly splits raw slash-command strings");
+  assert.deepEqual(readArgv(tempDir).argv, ["doctor", "--debug"], "[GUARD] --raw-arg-string explicitly splits raw slash-command strings");
 });
 
 test("[RED] C2 / Rule 2: unknown flags on cli fail closed (never allow a later --help to look help-only, never record write:false, and always track the job while forwarding argv verbatim)", () => {
@@ -1326,7 +1327,9 @@ function routerKeyOf(arg) {
 
 test("[RED] R2 allow-list: unknown flags at every position around known subcommands and --help never run untracked, and router-owned options never reach grok", () => {
   const tempDir = makeTempDir();
-  const parsed = parseGrokHelp(fs.readFileSync(path.join(FIXTURES, "grok-help.txt"), "utf8"));
+  const helpFixture = fs.readFileSync(path.join(FIXTURES, "grok-help.txt"), "utf8");
+  const grammar = buildCliGrammar(helpFixture);
+  const parsed = parseGrokHelp(helpFixture);
   const commands = [];
   for (const command of parsed.commands) {
     if (command.name) {
@@ -1358,7 +1361,9 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
         }
         const res = runCompanion(["cli", ...args], tempDir);
         const tracked = /Job ID:\s+\S+/.test(res.stderr);
-        if (fs.existsSync(argvPath) && !tracked) {
+        const recorded = readArgv(tempDir)?.argv ?? [];
+        const helpProbeOnly = recorded.length === 1 && recorded[0] === "--help";
+        if (!helpProbeOnly && !tracked) {
           untracked.push(args.join(" "));
         }
       }
@@ -1393,12 +1398,21 @@ test("[RED] R2 allow-list: unknown flags at every position around known subcomma
         if (fs.existsSync(argvPath)) {
           fs.unlinkSync(argvPath);
         }
+        const previous = index > 0 ? args[index - 1] : null;
+        const injectionIsValue = Boolean(
+          previous &&
+          (grammar.valueFlags.has(previous) || (grammar.optionalValueFlags.has(previous) && !injection.startsWith("-")))
+        );
+        if (injectionIsValue) {
+          continue;
+        }
         runCompanion(["cli", ...args], tempDir);
         if (!fs.existsSync(argvPath)) {
           continue;
         }
         const recorded = readArgv(tempDir)?.argv ?? [];
-        const hit = recorded.map(routerKeyOf).find((key) => key && ROUTER_OWNED_OPTIONS.has(key));
+        const injectionKey = routerKeyOf(injection);
+        const hit = recorded.some((arg) => routerKeyOf(arg) === injectionKey);
         if (hit) {
           leaked.push(`${args.join(" ")} -> ${recorded.join(" ")}`);
         }
@@ -1451,7 +1465,9 @@ test("[RED] A2: misplaced --raw-arg-string and --timeout are rejected and never 
     }
     const res = runCompanion(["cli", ...args], tempDir);
     assert.notEqual(res.status, 0, `[RED] A2: cli ${args.join(" ")} must be rejected`);
-    assert.equal(fs.existsSync(argvPath), false, `[RED] A2: cli ${args.join(" ")} must not reach grok`);
+    const recorded = readArgv(tempDir)?.argv ?? [];
+    const reachedGrok = recorded.some((arg) => arg === "--raw-arg-string" || arg.startsWith("--raw-arg-string=") || arg === "--timeout" || arg.startsWith("--timeout="));
+    assert.equal(reachedGrok, false, `[RED] A2: cli ${args.join(" ")} must not reach grok (argv ${recorded.join(" ")})`);
     assert.match(res.stderr, /router option/, `[RED] A2: cli ${args.join(" ")} is rejected as a router option`);
   }
 });

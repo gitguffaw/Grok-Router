@@ -33,6 +33,11 @@ Several round-4a review findings (`R-B`, `R-C`, `R-D`) stemmed from trying to ma
    - Short-flag cluster expansion (`-cp`, `-cphello`, `-rc`) is **purely internal** to `tokenizeCliArgv` for classification and metadata extraction; `passthroughArgs` keeps the exact original token (`-cp`, `-cphello`, `-rc`) untouched.
    - The **sole** exception where a native argument value is translated is when the user explicitly passes a router `<jobId>` to standalone `-r <jobId>`, `--resume <jobId>`, or `--resume=<jobId>` (the documented router convenience feature from #5 / Finding 4). If a router `<jobId>` is embedded inside an ambiguous or combined short cluster (e.g., `-cr=<jobId>`), the router does not rewrite the cluster; it fails closed or requires standalone `-r <jobId>` / `--resume <jobId>`.
 2. **Rule (2) — Fail closed on ambiguity**:
+   - Untracked `cli` is an allow-list, not a denylist. A run is untracked only when every option is recognized from the grammar built from live `grok --help` and the whole shape is one of:
+     1. bare `--help` or `-h`,
+     2. `<known subcommand> [non-flag path tokens...] --help` / `-h` (at least one help flag, nothing before the subcommand, no other dash token),
+     3. a bare command from the explicit read-only set (`READ_ONLY_CLI_SUBCOMMANDS`: `agent`, `completions`, `cursor-worker`, `dashboard`, `doctor`, `du`, `disk-usage`, `export`, `help`, `inspect`, `leader`, `models`, `sessions`, `trace`, `usage`, `version`, `v`, `wrap`).
+   - Anything else is tracked. That includes an unknown long flag, an unknown short flag, an unknown `--flag=value`, or any token before a subcommand (`cli --future-value sessions --help`, `cli -Z sessions`). A new grok subcommand is tracked until it is added to that set.
    - Whenever a token or boundary is ambiguous (an unknown short-flag cluster, an unknown flag after a subcommand, an unverified variadic boundary, or an unparsed option when `grok --help` is unavailable), the router **fails closed**:
      - It does **not** guess that the run is `helpOnly: true` (so the run is tracked as a job rather than silently dropped).
      - It does **not** guess that `write` is `false` (recording `write: "unknown"`, or requiring `--allow-mutating` when the subcommand is unclassified/mutating).
@@ -228,7 +233,7 @@ Several round-4a review findings (`R-B`, `R-C`, `R-D`) stemmed from trying to ma
 ### Module Boundaries & Shared Helpers (`A4`, `C-A`, `K-C`)
 
 - **Helpers moved so `lib/cli.mjs` has zero dependency on `grok-companion.mjs`**:
-  - `normalizeArgv(argv)` moves to `plugins/grok-router/scripts/lib/args.mjs` (and is re-imported by `grok-companion.mjs`).
+  - `normalizeArgv(argv)` lives in `plugins/grok-router/scripts/lib/args.mjs` for non-cli entry points. `cli` does not call it. `normalizeCliArgv` splits only the explicit first-position wrapper `--raw-arg-string <one token>`. A single argv element that contains spaces (`cli "sessions --json"`) is not re-split.
   - `resolveCwd(options)` moves to `plugins/grok-router/scripts/lib/workspace.mjs` (and is re-imported by `grok-companion.mjs`).
   - `emitJobStarted(job)` is imported from `plugins/grok-router/scripts/lib/render.mjs`.
 - **New module**: `plugins/grok-router/scripts/lib/cli.mjs` (~450–520 lines).
@@ -242,14 +247,14 @@ Several round-4a review findings (`R-B`, `R-C`, `R-D`) stemmed from trying to ma
 ### Single-Pass Tokenizer Rules (`tokenizeCliArgv(normalizedArgv, grammar, { rejectRouterFlags = true } = {})`)
 
 1. **No `--cwd` Pre-Scan (`A-D`)**:
-   - `handleCli` calls `const help = readGrokHelp(process.cwd(), env)` once, builds `const grammar = buildCliGrammar(help)`, and runs `tokenizeCliArgv(normalizeArgv(argv), grammar)`.
+   - `handleCli` calls `const help = readGrokHelp(process.cwd(), env)` once, builds `const grammar = buildCliGrammar(help)`, and runs `tokenizeCliArgv(normalizeCliArgv(argv), grammar)`.
 2. **Option-Position Boundary and Subcommand Handling (`A-I`, `R-D`, `R-G`)**:
    - `inOptionPosition` starts `true`.
    - It becomes `false` when:
      a. `--` is reached: `--` and all remaining tokens are pushed verbatim to `passthroughArgs` and emitted as `{ kind: "separator" }` followed by `{ kind: "positional" }`.
      b. A positional token is reached that is a known subcommand (`grammar.commandNames.has(token)`), e.g., `models`, `sessions`, `clone`, `wrap`, `help`.
-   - **After a known subcommand (`inOptionPosition === false`, before `--`) (`R-D`, `R-G`)**:
-     - All subsequent tokens are pushed verbatim to `passthroughArgs` as opaque subcommand arguments (router options like `--cwd` or `--json` after a subcommand are forwarded to `grok` rather than consumed or rejected by the router; router options must precede the subcommand — `R-G`).
+   - **After a known subcommand (`inOptionPosition === false`, before `--`) (`R-D`, round-2 allow-list)**:
+     - Recognized non-router tokens are pushed verbatim to `passthroughArgs`. Router-owned options are rejected anywhere they are not consumed, including after a subcommand and as `--flag=value`. Consumed forms are only `--cwd` / `-C`, `--timeout-ms`, `--allow-mutating`, `--allow-dangerous` (in option position), and `--raw-arg-string` as the first-position wrapper. `--raw-arg-string` and `--timeout` are in `CLI_REJECTED_ROUTER_OPTIONS`. Tokens after `--` stay literal. This supersedes the earlier rule that forwarded router-named flags such as `cli sessions --json`.
      - **No `--help` scan across subcommand arguments (`R-D`)**: Because root help does not describe subcommand option arities, scanning subcommand arguments for `--help` could mistake a subcommand option's value (or `grok wrap` child arguments) for a help flag and suppress mutating classification. Instead, under Rule (2) (fail closed), a subcommand invocation is classified as `helpOnly: true` **only** when:
        1. The subcommand itself is `"help"` (`first === "help"`), OR
        2. A top-level `--help` / `-h` option appeared *before* the subcommand, OR
