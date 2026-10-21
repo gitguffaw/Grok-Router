@@ -1,20 +1,20 @@
 {
   "name": "grok-router",
   "description": "Live model discovery, policy-backed Grok delegation, and review for Claude Code, Codex, and AGY.",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "owner": {
     "name": "gitguffaw"
   },
   "metadata": {
     "description": "Grok Router plugin for live model discovery, policy-backed Grok delegation, and tracked jobs.",
-    "version": "0.3.8"
+    "version": "0.3.9"
   },
   "plugins": [
     {
       "name": "grok-router",
       "displayName": "Grok Router",
       "description": "Route host-agent work through Grok with live discovery, policy-backed modes, and tracked jobs.",
-      "version": "0.3.8",
+      "version": "0.3.9",
       "author": { "name": "gitguffaw" },
       "homepage": "https://github.com/gitguffaw/Grok-Skill#readme",
       "repository": "https://github.com/gitguffaw/Grok-Skill",

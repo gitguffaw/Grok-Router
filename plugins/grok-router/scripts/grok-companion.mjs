@@ -644,7 +644,7 @@ async function runPanel(mode, { options, prompt, lanes, nativeControls, cwd, env
 }
 
 async function handleStatus(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
+  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: true });
   const cwd = resolveCwd(options);
   refreshStaleJobs(cwd);
   const reference = positionals[0] || "";
@@ -670,7 +670,7 @@ async function handleStatus(argv) {
 }
 
 async function handleResult(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
+  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: true });
   const cwd = resolveCwd(options);
   refreshStaleJobs(cwd);
   const job = readFullJob(cwd, positionals[0] || "");
@@ -691,7 +691,7 @@ async function handleResult(argv) {
 }
 
 async function handleCancel(argv) {
-  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: false });
+  const { options, positionals } = parseCommandInput(argv, { stopAtPositional: true });
   const cwd = resolveCwd(options);
   const job = await cancelJob(cwd, positionals[0] || "");
   output(options.json ? job : renderStoredJobResult(job), Boolean(options.json));

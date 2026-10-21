@@ -168,9 +168,6 @@ export function buildRouterRequest({
   const effort = options.effort ?? options["reasoning-effort"] ?? null;
   const tools = write ? null : toolsFor(mode, options);
   const resume = options.resume && options.resume !== true ? options.resume : null;
-  // Managed controls (model, effort, continue, and named resume) are emitted
-  // by buildGrokPrintArgs through controls. Keep a bare --resume on the native
-  // path for the CLI session picker.
   const nativeArgs = nativeArgsFromParsedOptions(
     options,
     nativeControls.filter((control) => !MANAGED_CONTROL_OPTIONS.has(control.option) && (control.option !== "resume" || !resume))

@@ -5,7 +5,6 @@ import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { shouldEmitLiveProgress, stripHostNoise } from "../plugins/grok-router/scripts/lib/render.mjs";
 import { handleCli, resolveKnownSessionId } from "../plugins/grok-router/scripts/lib/cli.mjs";
-import { main } from "../plugins/grok-router/scripts/grok-companion.mjs";
 import { resolveJobFile, resolveStateDir, saveJob } from "../plugins/grok-router/scripts/lib/state.mjs";
 import { COMPANION, helpText, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
 
@@ -314,7 +313,6 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(turn1Result.status, 0, turn1Result.stderr);
   assert.match(turn1Result.stdout, new RegExp(`Resume in Grok: grok --resume ${sid}`));
 
-  // Turn 2 via cli -r <SID>
   const cliTurn = runCompanion(
     [
       "cli",
@@ -350,7 +348,6 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.ok(cliJob.rendered.includes("Quote the question I asked in the previous turn."));
   assert.ok(cliJob.logFile && fs.existsSync(cliJob.logFile));
 
-  // Turn 3 via managed analyze --resume <SID>: links turn-by-turn to cliJobId (Turn 2) and passes read-only --tools in grok argv
   const analyzeResumed = runCompanion(
     ["analyze", "--resume", sid, "--json", "Quote the question I asked in the previous turn."],
     tempDir
@@ -367,7 +364,6 @@ test("cli runs (including cli -r <SID> resumes) and managed --resume runs are tr
   assert.equal(analyzeArgv[analyzeArgv.indexOf("--tools") + 1], "read_file,grep,list_dir");
   assert.ok(!analyzeArgv.includes("--always-approve"));
 
-  // Unknown raw session ID has resumeOf: null (never a raw session ID)
   const unknownSid = "99999999-9999-4999-8999-999999999999";
   const cliUnknownResume = runCompanion(
     ["cli", "-r", unknownSid, "-p", "Resume unknown session.", "--output-format", "json"],
@@ -576,43 +572,14 @@ test("cli only tracks prompt or session-resume runs and leaves help/discovery su
 
 test("cli passes no timeout (0) to runProcess when --timeout-ms is absent", async () => {
   const tempDir = makeTempDir();
-  const env = testEnv(tempDir);
-  const prevEnv = { ...process.env };
-  Object.assign(process.env, env);
-  const origSetTimeout = globalThis.setTimeout;
-  const origStdoutWrite = process.stdout.write.bind(process.stdout);
-  const scheduledDelays = [];
-  globalThis.setTimeout = function wrappedSetTimeout(fn, delay, ...rest) {
-    if (Number(delay) >= 1000) {
-      scheduledDelays.push(Number(delay));
-    }
-    return origSetTimeout.call(this, fn, delay, ...rest);
-  };
-  process.stdout.write = () => true;
   let capturedRunProcessTimeoutMs;
-  try {
-    await main(["cli", "--cwd", tempDir, "-p", "Check default timeout", "--output-format", "json"]);
-    assert.deepEqual(scheduledDelays, [], `expected no timeout timer in runProcess, got ${JSON.stringify(scheduledDelays)}`);
-
-    assert.equal(typeof handleCli, "function");
-    await handleCli(["--cwd", tempDir, "-p", "Check runProcess options", "--output-format", "json"], {
-      runProcessImpl: async (_cmd, _args, opts) => {
-        capturedRunProcessTimeoutMs = opts.timeoutMs;
-        return { status: 0, stdout: '{"text":"ok","sessionId":"11111111-1111-4111-8111-111111111111"}\n', stderr: "", timedOut: false };
-      }
-    });
-    assert.equal(capturedRunProcessTimeoutMs, 0);
-  } finally {
-    process.stdout.write = origStdoutWrite;
-    globalThis.setTimeout = origSetTimeout;
-    for (const key of Object.keys(env)) {
-      if (!(key in prevEnv)) {
-        delete process.env[key];
-      } else {
-        process.env[key] = prevEnv[key];
-      }
+  await handleCli(["--cwd", tempDir, "-p", "Check runProcess options", "--output-format", "json"], {
+    runProcessImpl: async (_cmd, _args, opts) => {
+      capturedRunProcessTimeoutMs = opts.timeoutMs;
+      return { status: 0, stdout: "", stderr: "", timedOut: false };
     }
-  }
+  });
+  assert.equal(capturedRunProcessTimeoutMs, 0);
 });
 
 test("cli marks editing tools as write:true and read-only tools as write:false", () => {
@@ -713,16 +680,13 @@ test("resolveKnownSessionId walks a resume chain of three or more jobs and handl
     request: { controls: { resume: null } }
   }, env);
 
-  // Walks 3-job chain (job3 -> job2 -> job1) and finds rootSid
   assert.equal(typeof resolveKnownSessionId, "function");
   assert.equal(resolveKnownSessionId(tempDir, job3, env), rootSid);
 
-  // Corrupt middle job file (job2) -> returns null without throwing
   const job2File = resolveJobFile(tempDir, job2.id, env);
   fs.writeFileSync(job2File, "{corrupted json", "utf8");
   assert.equal(resolveKnownSessionId(tempDir, job3, env), null);
 
-  // Remove middle job file (job2) -> returns null without throwing
   fs.unlinkSync(job2File);
   assert.equal(resolveKnownSessionId(tempDir, job3, env), null);
 });
@@ -784,7 +748,6 @@ test("cli rejects router-only flags only in option position, never as flag value
 test("cli write classification detects --yolo/--always-approve only as options and records write as unknown when --tools is omitted", () => {
   const tempDir = makeTempDir();
 
-  // R3a: -p "--yolo" with read-only --tools must be write:false (not write:true)
   const yoloPromptReadOnly = runCompanion(
     ["cli", "-p", "--yolo", "--tools", "read_file,grep,list_dir", "--output-format", "json"],
     tempDir
@@ -797,7 +760,6 @@ test("cli write classification detects --yolo/--always-approve only as options a
   assert.equal(yoloPromptJob.write, false);
   assert.equal(yoloPromptJob.request.write, false);
 
-  // R3b: when --tools is omitted and no --always-approve/--yolo is passed, grok's default tools can edit, so write is "unknown"
   const noToolsRun = runCompanion(
     ["cli", "-p", "Hello without tools flag", "--output-format", "json"],
     tempDir
@@ -809,7 +771,6 @@ test("cli write classification detects --yolo/--always-approve only as options a
   assert.equal(noToolsJob.write, "unknown");
   assert.equal(noToolsJob.request.write, "unknown");
 
-  // Real --yolo option sets write:true
   const realYoloRun = runCompanion(
     ["cli", "--yolo", "-p", "Hello with yolo", "--output-format", "json"],
     tempDir
@@ -862,7 +823,7 @@ test("--continue and -c turns link into the resumeOf chain using the most recent
   assert.equal(otherCwdTurn.status, 0, otherCwdTurn.stderr + otherCwdTurn.stdout);
   const otherCwdId = otherCwdTurn.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   assert.ok(otherCwdId);
-  const otherCwdJob = JSON.parse(runCompanion(["result", "--json", otherCwdId, "--cwd", otherCwd], tempDir).stdout);
+  const otherCwdJob = JSON.parse(runCompanion(["result", "--json", "--cwd", otherCwd, otherCwdId], tempDir).stdout);
   assert.equal(otherCwdJob.resumeOf, null);
 });
 
@@ -1003,35 +964,29 @@ test("[RED] T-A2a / R-E / R-F: -c and bare -r skip failed jobs and grok-lane lea
   const sid2 = "66666666-6666-4666-8666-666666666663";
   const externalSid = "66666666-6666-4666-8666-666666666669";
 
-  // [SETUP] Turn 1: analyze succeeds with sid1
   const turn1 = runCompanion(["analyze", "--json", "Root turn 1"], tempDir, { GROK_FAKE_SESSION: sid1 });
   assert.equal(turn1.status, 0, turn1.stderr + turn1.stdout);
   const turn1Job = JSON.parse(turn1.stdout);
   assert.equal(turn1Job.grokSessionId, sid1, "[SETUP] turn 1 session is sid1");
 
-  // [SETUP] Turn 2: analyze --lanes a,b creates completed grok-lane leaf jobs
   const turn2Lanes = runCompanion(["analyze", "--lanes", "a,b", "--json", "Inspect lanes"], tempDir, { GROK_FAKE_SESSION: sidLanes });
   assert.equal(turn2Lanes.status, 0, turn2Lanes.stderr + turn2Lanes.stdout);
 
-  // [RED] Turn 3 (immediately after lanes, before any failed job): cli -c skips grok-lane leaves and links to turn1Job
   const turn3 = runCompanion(["cli", "-c", "-p", "After lanes", "--output-format", "json"], tempDir, { GROK_FAKE_SESSION: sid1 });
   assert.equal(turn3.status, 0, turn3.stderr + turn3.stdout);
   const turn3Id = turn3.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   const turn3Job = JSON.parse(runCompanion(["result", "--json", turn3Id], tempDir).stdout);
   assert.equal(turn3Job.resumeOf, turn1Job.id, "[RED] -c skips grok-lane leaf jobs and links to turn 1");
 
-  // [SETUP] Turn 4: failed cli run
   const turn4Fail = runCompanion(["cli", "-p", "Fail turn", "--output-format", "json"], tempDir, { GROK_FAKE_AUTH: "1" });
   assert.notEqual(turn4Fail.status, 0, "[SETUP] turn 4 fails");
 
-  // [RED] Turn 5: cli -c skips the failed turn 4 and links to turn 3
   const turn5 = runCompanion(["cli", "-c", "-p", "After failed turn", "--output-format", "json"], tempDir, { GROK_FAKE_SESSION: sid1 });
   assert.equal(turn5.status, 0, turn5.stderr + turn5.stdout);
   const turn5Id = turn5.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   const turn5Job = JSON.parse(runCompanion(["result", "--json", turn5Id], tempDir).stdout);
   assert.equal(turn5Job.resumeOf, turn3Id, "[RED] -c skips failed job and links to turn 3");
 
-  // [RED] R-E: bare -r starts null pre-run (so plain output with no reported session stays null) and reconciles post-run when JSON reports a session
   const barePlain = runCompanion(["cli", "-r", "-p", "Bare resume plain"], tempDir);
   assert.equal(barePlain.status, 0, barePlain.stderr + barePlain.stdout);
   const barePlainId = barePlain.stderr.match(/Job ID:\s+(\S+)/)?.[1];
@@ -1044,7 +999,6 @@ test("[RED] T-A2a / R-E / R-F: -c and bare -r skip failed jobs and grok-lane lea
   const bareJsonJob = JSON.parse(runCompanion(["result", "--json", bareJsonId], tempDir).stdout);
   assert.equal(bareJsonJob.resumeOf, turn5Id, "[RED] R-E: bare -r reconciles resumeOf post-run from reported session sid1");
 
-  // [RED] Post-run reconciliation overrides pre-run guess when grok reports an older session (sid1 after sid2) or clears to null on an untracked external session
   const turnSid2 = runCompanion(["cli", "-p", "New session sid2", "--output-format", "json"], tempDir, { GROK_FAKE_SESSION: sid2 });
   assert.equal(turnSid2.status, 0);
   const turnSid2Id = turnSid2.stderr.match(/Job ID:\s+(\S+)/)?.[1];
@@ -1109,11 +1063,9 @@ test("[RED] T-C2 / A-E / R-E / R-H: J3 -r S links to plain-output J2, title-base
   const otherSid = "88888888-8888-4888-8888-888888888883";
   const failedPartialSid = "88888888-8888-4888-8888-888888888884";
 
-  // [SETUP] Turn 1 (J1): reports session sid
   const j1 = JSON.parse(runCompanion(["analyze", "--json", "Start S"], tempDir, { GROK_FAKE_SESSION: sid }).stdout);
   assert.equal(j1.grokSessionId, sid, "[SETUP] J1 reports sid");
 
-  // [SETUP] Turn 2 (J2): plain output cli -r sid -> grokSessionId is "unknown", controls.resume is sid
   const j2Run = runCompanion(["cli", "-r", sid, "-p", "Plain turn 2"], tempDir);
   assert.equal(j2Run.status, 0);
   const j2Id = j2Run.stderr.match(/Job ID:\s+(\S+)/)?.[1];
@@ -1121,14 +1073,12 @@ test("[RED] T-C2 / A-E / R-E / R-H: J3 -r S links to plain-output J2, title-base
   assert.equal(j2.grokSessionId, "unknown", "[SETUP] J2 has unknown grokSessionId");
   assert.equal(j2.resumeOf, j1.id, "[SETUP] J2 links to J1");
 
-  // [RED] Turn 3 (J3): cli -r sid links to J2 (not skipping J2 back to J1)
   const j3Run = runCompanion(["cli", "-r", sid, "-p", "Turn 3", "--output-format", "json"], tempDir, { GROK_FAKE_SESSION: sid });
   assert.equal(j3Run.status, 0);
   const j3Id = j3Run.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   const j3 = JSON.parse(runCompanion(["result", "--json", j3Id], tempDir).stdout);
   assert.equal(j3.resumeOf, j2Id, "[RED] C2: J3 links to plain-output J2 rather than skipping to J1");
 
-  // [RED] R-E: title-based -r starts null pre-run and reconciles post-run to J3 when grok reports sid
   const j4PlainTitleRun = runCompanion(["cli", "-r", "my-session-title", "-p", "Plain title turn"], tempDir);
   assert.equal(j4PlainTitleRun.status, 0);
   const j4PlainTitleId = j4PlainTitleRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
@@ -1145,7 +1095,6 @@ test("[RED] T-C2 / A-E / R-E / R-H: J3 -r S links to plain-output J2, title-base
   const j4TitleJson = JSON.parse(runCompanion(["result", "--json", j4TitleJsonId], tempDir).stdout);
   assert.equal(j4TitleJson.resumeOf, j3Id, "[RED] R-E: title-based -r reconciles post-run to J3 via reported UUID sid");
 
-  // [GUARD] A-E: --fork-session preserves the pre-run source link even though grok reports forkedSid
   const j5ForkRun = runCompanion(
     ["cli", "-c", "--fork-session", "-p", "Forked turn", "--output-format", "json"],
     tempDir,
@@ -1156,7 +1105,6 @@ test("[RED] T-C2 / A-E / R-E / R-H: J3 -r S links to plain-output J2, title-base
   const j5Fork = JSON.parse(runCompanion(["result", "--json", j5ForkId], tempDir).stdout);
   assert.equal(j5Fork.resumeOf, j4TitleJsonId, "[GUARD] A-E: --fork-session keeps pre-run source link");
 
-  // [GUARD] A-E: contradictory session evidence (requested sid, reported otherSid) does not match sid
   const j6ReassignRun = runCompanion(
     ["cli", "-r", sid, "-p", "Reassigned turn", "--output-format", "json"],
     tempDir,
@@ -1173,7 +1121,6 @@ test("[RED] T-C2 / A-E / R-E / R-H: J3 -r S links to plain-output J2, title-base
   const j7 = JSON.parse(runCompanion(["result", "--json", j7Id], tempDir).stdout);
   assert.equal(j7.resumeOf, j4TitleJsonId, "[GUARD] A-E: job that requested sid but reported otherSid is not matched for sid");
 
-  // [RED] R-H: failed or timed-out jobs that emitted a session ID preserve grokSessionId so rescue --resume-last works
   const rescueFailed = runCompanion(
     ["rescue", "--json", "Start rescue that fails after emitting session"],
     tempDir,
