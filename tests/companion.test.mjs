@@ -1747,15 +1747,38 @@ test("[RED] Z2: a positional prompt before every mutating command or sub-action 
       const res = runCompanion(["cli", ...args], tempDir);
       const label = args.join(" ");
       const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
-      if (res.status === 0 || !/--allow-mutating/.test(res.stderr) || jobId) {
+      if (res.status === 0 || !/may mutate/.test(res.stderr) || /not classified/.test(res.stderr) || jobId) {
         problems.push(label);
       }
     }
   }
+  const injections = [["--future"], ["--future", "x"]];
+  let injectionCount = 0;
+  for (const prefix of prefixes) {
+    for (const tail of tails) {
+      const shape = [...prefix, "hello", ...tail];
+      for (let index = 0; index <= shape.length; index += 1) {
+        for (const injection of injections) {
+          injectionCount += 1;
+          const args = [...shape.slice(0, index), ...injection, ...shape.slice(index)];
+          const res = runCompanion(["cli", ...args], tempDir);
+          const label = args.join(" ");
+          const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+          if (res.status === 0 || !/may mutate/.test(res.stderr) || /not classified/.test(res.stderr) || jobId) {
+            problems.push(label);
+          }
+        }
+      }
+    }
+  }
+  const expectedInjections = prefixes.reduce((sum, prefix) => (
+    sum + tails.reduce((inner, tail) => inner + (prefix.length + 1 + tail.length + 1) * injections.length, 0)
+  ), 0);
+  assert.equal(injectionCount, expectedInjections, "[SETUP] unknown-option injections cover every position");
   assert.equal(
     problems.length,
     0,
-    `[RED] Z2: ${problems.length} prompt-then-command shapes were not refused (${problems.slice(0, 8).join(" || ")})`
+    `[RED] Z2: ${problems.length} prompt-then-command shapes were not refused with "may mutate" (${problems.slice(0, 8).join(" || ")})`
   );
 });
 
@@ -1833,6 +1856,93 @@ test("[RED] Z3: a prompt or an unknown option before a mutating sub-action is re
     }
   }
   assert.equal(problems.length, 0, `[RED] Z3: ${problems.join(" || ")}`);
+});
+
+test("[RED] Z4: an unknown option leaves payload boundaries unresolved, so any mutating plain token is refused", () => {
+  const tempDir = makeTempDir();
+  const noHelpDir = path.join(tempDir, "no-help");
+  fs.mkdirSync(noHelpDir);
+  fs.writeFileSync(path.join(noHelpDir, "grok-help.txt"), "");
+  const withoutHelp = { GROK_FAKE_FIXTURES: noHelpDir };
+  const refused = [
+    ["-c", "hello", "--future", "x", "login"],
+    ["-c", "hello", "--future", "x", "doctor", "fix"],
+    ["--future", "a", "b", "login"],
+    ["-c", "--future", "x", "hello", "login"],
+    ["-Z", "x", "hello", "login"],
+    ["-c", "hello", "-Z", "x", "mcp", "add", "y"],
+    ["sessions", "--future", "search", "delete", "X"],
+    ["doctor", "--future", "usage", "fix"],
+    ["-c", "hello", "--future=x", "login"],
+    ["wrap", "--future", "echo", "login"]
+  ];
+  const pins = [
+    ["-r", "hello", "login"],
+    ["-w", "hello", "login"],
+    ["-r", "login"]
+  ];
+  const tracked = [
+    ["-c", "hello", "--future", "x", "version"],
+    ["-c", "hello", "wrap", "echo", "login"],
+    ["wrap", "echo", "login"],
+    ["wrap", "git", "clone", "x"],
+    ["sessions", "search", "delete"],
+    ["sessions", "search", "login"],
+    ["usage", "login"]
+  ];
+  const problems = [];
+  function assertRefused(args, extras, labelPrefix) {
+    const label = `${labelPrefix}${args.join(" ")}`;
+    const res = runCompanion(["cli", ...args], tempDir, extras);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (res.status === 0 || !/may mutate/.test(res.stderr) || /not classified/.test(res.stderr) || jobId) {
+      problems.push(`${label} was not refused for mutating`);
+    }
+  }
+  for (const args of [...refused, ...pins]) {
+    assertRefused(args, {}, "");
+    assertRefused(args, withoutHelp, "no-help ");
+    const allowed = runCompanion(["cli", "--allow-mutating", ...args], tempDir);
+    const allowedId = allowed.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    const label = args.join(" ");
+    if (!allowedId) {
+      problems.push(`--allow-mutating ${label} was not tracked`);
+    } else {
+      const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, allowedId, testEnv(tempDir)), "utf8"));
+      if (job.write !== "unknown" || job.request?.write !== "unknown") {
+        problems.push(`--allow-mutating ${label} write ${JSON.stringify(job.write)}`);
+      }
+      const recorded = readArgv(tempDir)?.argv ?? [];
+      if (JSON.stringify(recorded) !== JSON.stringify(args)) {
+        problems.push(`--allow-mutating ${label} argv ${JSON.stringify(recorded)}`);
+      }
+    }
+  }
+  for (const args of tracked) {
+    const argvPath = path.join(tempDir, "argv.json");
+    if (fs.existsSync(argvPath)) {
+      fs.unlinkSync(argvPath);
+    }
+    const label = args.join(" ");
+    const res = runCompanion(["cli", ...args], tempDir);
+    const jobId = res.stderr.match(/Job ID:\s+(\S+)/)?.[1];
+    if (res.status !== 0 || /may mutate/.test(res.stderr)) {
+      problems.push(`${label} was refused`);
+    }
+    if (!jobId) {
+      problems.push(`${label} created no job`);
+      continue;
+    }
+    const job = JSON.parse(fs.readFileSync(resolveJobFile(tempDir, jobId, testEnv(tempDir)), "utf8"));
+    if (job.write !== "unknown" || job.request?.write !== "unknown") {
+      problems.push(`${label} write ${JSON.stringify(job.write)}`);
+    }
+    const recorded = readArgv(tempDir)?.argv ?? [];
+    if (JSON.stringify(recorded) !== JSON.stringify(args)) {
+      problems.push(`${label} argv ${JSON.stringify(recorded)}`);
+    }
+  }
+  assert.equal(problems.length, 0, `[RED] Z4: ${problems.slice(0, 12).join(" || ")}`);
 });
 
 test("[RED] Y2: bare models, du, and disk-usage are tracked", () => {
