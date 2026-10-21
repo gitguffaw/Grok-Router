@@ -6,7 +6,9 @@ import { spawn, spawnSync } from "node:child_process";
 import { shouldEmitLiveProgress, stripHostNoise } from "../plugins/grok-router/scripts/lib/render.mjs";
 import { handleCli, resolveKnownSessionId } from "../plugins/grok-router/scripts/lib/cli.mjs";
 import { resolveJobFile, resolveStateDir, saveJob } from "../plugins/grok-router/scripts/lib/state.mjs";
-import { COMPANION, helpText, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
+import { parseGrokHelp } from "../plugins/grok-router/scripts/lib/help.mjs";
+import { ROUTER_OWNED_OPTIONS } from "../plugins/grok-router/scripts/lib/live-controls.mjs";
+import { COMPANION, FIXTURES, helpText, makeTempDir, readArgv, testEnv } from "./helpers.mjs";
 
 test("host only hears ready plus blocking startup errors", () => {
   assert.equal(shouldEmitLiveProgress("Ready to work."), true);
@@ -1303,5 +1305,117 @@ test("[RED] Item 5 / C4: legacy job records without jobClass stay eligible for -
   const contId = contRun.stderr.match(/Job ID:\s+(\S+)/)?.[1];
   const contJob = JSON.parse(runCompanion(["result", "--json", contId], tempDir).stdout);
   assert.equal(contJob.resumeOf, legacyParent.id, "[RED] C4: legacy parent job without jobClass is eligible for -c lookup while legacy lane leaf is skipped");
+});
+
+function spliceToken(base, index, token) {
+  return [...base.slice(0, index), token, ...base.slice(index)];
+}
+
+function routerKeyOf(arg) {
+  if (arg === "-C") {
+    return "cwd";
+  }
+  if (!String(arg).startsWith("--")) {
+    return null;
+  }
+  const body = String(arg).slice(2);
+  const eq = body.indexOf("=");
+  const key = eq === -1 ? body : body.slice(0, eq);
+  return key || null;
+}
+
+test("[RED] R2 allow-list: unknown flags at every position around known subcommands and --help never run untracked, and router-owned options never reach grok", () => {
+  const tempDir = makeTempDir();
+  const parsed = parseGrokHelp(fs.readFileSync(path.join(FIXTURES, "grok-help.txt"), "utf8"));
+  const commands = [];
+  for (const command of parsed.commands) {
+    if (command.name) {
+      commands.push(command.name);
+    }
+    for (const alias of command.aliases ?? []) {
+      if (alias) {
+        commands.push(alias);
+      }
+    }
+  }
+  assert.ok(commands.includes("sessions") && commands.includes("models") && commands.includes("clone"), "[SETUP] fixture help lists known subcommands");
+
+  const commandBases = [["--help"], ["-h"]];
+  for (const command of commands) {
+    commandBases.push([command]);
+    commandBases.push([command, "--help"]);
+    commandBases.push([command, "-h"]);
+  }
+  const unknownInjections = ["--future-value", "-Z", "--future-value=v"];
+  const untracked = [];
+  for (const base of commandBases) {
+    for (let index = 0; index <= base.length; index += 1) {
+      for (const injection of unknownInjections) {
+        const args = spliceToken(base, index, injection);
+        const argvPath = path.join(tempDir, "argv.json");
+        if (fs.existsSync(argvPath)) {
+          fs.unlinkSync(argvPath);
+        }
+        const res = runCompanion(["cli", ...args], tempDir);
+        const tracked = /Job ID:\s+\S+/.test(res.stderr);
+        if (fs.existsSync(argvPath) && !tracked) {
+          untracked.push(args.join(" "));
+        }
+      }
+    }
+  }
+
+  const routerBases = [
+    ["--help"],
+    ["-h"],
+    ["models"],
+    ["models", "--help"],
+    ["sessions"],
+    ["sessions", "--help"],
+    ["sessions", "-h"],
+    ["login"],
+    ["clone", "--help"],
+    ["mcp", "add", "--help"],
+    ["doctor"],
+    ["-p", "hi"]
+  ];
+  const routerInjections = [];
+  for (const key of ROUTER_OWNED_OPTIONS) {
+    routerInjections.push(`--${key}`);
+    routerInjections.push(`--${key}=v`);
+  }
+  const leaked = [];
+  for (const base of routerBases) {
+    for (let index = 0; index <= base.length; index += 1) {
+      for (const injection of routerInjections) {
+        const args = spliceToken(base, index, injection);
+        const argvPath = path.join(tempDir, "argv.json");
+        if (fs.existsSync(argvPath)) {
+          fs.unlinkSync(argvPath);
+        }
+        runCompanion(["cli", ...args], tempDir);
+        if (!fs.existsSync(argvPath)) {
+          continue;
+        }
+        const recorded = readArgv(tempDir)?.argv ?? [];
+        const hit = recorded.map(routerKeyOf).find((key) => key && ROUTER_OWNED_OPTIONS.has(key));
+        if (hit) {
+          leaked.push(`${args.join(" ")} -> ${recorded.join(" ")}`);
+        }
+      }
+    }
+  }
+
+  const sample = (items) => items.slice(0, 6).join(" || ");
+  assert.equal(
+    untracked.length,
+    0,
+    `[RED] R2 allow-list: ${untracked.length} shapes ran untracked, including: ${sample(untracked)}`
+  );
+  assert.equal(
+    leaked.length,
+    0,
+    `[RED] R2 allow-list: ${leaked.length} router-owned options reached grok, including: ${sample(leaked)}`
+  );
 });
 
