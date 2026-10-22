@@ -14,7 +14,7 @@ Options:
           Inline subagent definitions as JSON
 
       --allow <RULE>
-          Permission allow rule (compat alias: --allowedTools)
+          Permission allow rule (compat aliases: --allowedTools, --allowed-tools)
 
       --always-approve
           Auto-approve all tool executions

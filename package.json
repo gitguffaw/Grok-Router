@@ -1,6 +1,6 @@
 {
   "name": "@gitguffaw/grok-router",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "type": "module",
   "description": "Route host-agent work through the local Grok CLI with live discovery, policy-backed modes, and tracked jobs.",
@@ -28,6 +28,6 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "lint": "node --check plugins/grok-router/scripts/grok-companion.mjs && node --check plugins/grok-router/scripts/grok-router-mcp.mjs"
+    "lint": "for f in plugins/grok-router/scripts/grok-companion.mjs plugins/grok-router/scripts/grok-router-mcp.mjs plugins/grok-router/scripts/lib/*.mjs; do node --check \"$f\" || exit 1; done"
   }
 }

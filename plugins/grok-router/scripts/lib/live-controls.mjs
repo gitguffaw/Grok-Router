@@ -58,7 +58,7 @@ function choicesForFlag(flag) {
 
 export function discoverGrokControls(helpText) {
   return parseGrokHelp(helpText).flags.flatMap((parsed) => {
-    const flag = longName(parsed.names);
+    const flag = parsed.long ?? longName(parsed.names);
     if (!flag) {
       return [];
     }
@@ -69,20 +69,23 @@ export function discoverGrokControls(helpText) {
     if (parsed.short) {
       aliases.push(optionName(parsed.short));
     }
+    const allOptionNames = unique([option, ...aliases]);
+    const policy = allOptionNames.some((name) => POLICY_OWNED_OPTIONS.has(name));
+    const routerOwned = allOptionNames.some((name) => ROUTER_OWNED_OPTIONS.has(name));
     return [{
       flag,
       option,
       optionAliases: unique(aliases),
       inputKeys: unique([option, option.replaceAll("-", "_"), ...aliases, ...aliases.map((alias) => alias.replaceAll("-", "_"))]),
       kind: parsed.requiresValue ? "value" : parsed.optionalValue ? "optional-value" : "boolean",
-      repeatable: ["allow", "deny"].includes(option),
+      repeatable: Boolean(parsed.variadic) || allOptionNames.some((name) => ["allow", "deny"].includes(name)),
       valueHint: parsed.valueHint,
       choices: choicesForFlag(parsed),
       description: parsed.description,
       default: parsed.default,
-      policy: POLICY_OWNED_OPTIONS.has(option),
-      routerOwned: ROUTER_OWNED_OPTIONS.has(option),
-      dangerous: DANGEROUS_OPTION_PATTERN.test(option) || POLICY_OWNED_OPTIONS.has(option),
+      policy,
+      routerOwned,
+      dangerous: allOptionNames.some((name) => DANGEROUS_OPTION_PATTERN.test(name)) || policy,
       source: "grok-help"
     }];
   });

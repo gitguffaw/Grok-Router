@@ -59,7 +59,8 @@ if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
 
 const promptIndex = argv.indexOf("-p");
 const promptFileIndex = argv.indexOf("--prompt-file");
-if (promptIndex !== -1 || promptFileIndex !== -1) {
+const bareResumeWithoutPrompt = argv.some((arg) => arg === "-r" || arg === "--resume" || arg.startsWith("--resume=") || arg === "-c" || arg === "--continue");
+if (promptIndex !== -1 || promptFileIndex !== -1 || bareResumeWithoutPrompt) {
   const modelFlagCount = argv.filter((arg) => arg === "-m" || arg === "--model" || arg.startsWith("--model=")).length;
   if (modelFlagCount > 1) {
     process.stderr.write("error: the argument '--model <MODEL>' cannot be used multiple times\n\nUsage: grok [OPTIONS] [PROMPT] [COMMAND]\n");
@@ -91,7 +92,9 @@ if (promptIndex !== -1 || promptFileIndex !== -1) {
   }
   const prompt = promptIndex !== -1
     ? argv[promptIndex + 1]
-    : fs.readFileSync(argv[promptFileIndex + 1], "utf8");
+    : promptFileIndex !== -1
+      ? fs.readFileSync(argv[promptFileIndex + 1], "utf8")
+      : "";
   const fail = process.env.GROK_FAKE_FAIL === "1";
   const text = process.env.GROK_FAKE_TEXT || `fake grok response for: ${String(prompt).slice(0, 80)}`;
   let resumedSession = null;

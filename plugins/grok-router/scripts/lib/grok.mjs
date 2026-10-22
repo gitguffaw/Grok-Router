@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -60,12 +61,18 @@ export function getGrokAuthStatus(cwd, env = process.env) {
   };
 }
 
-export function readGrokHelp(cwd, env = process.env) {
+export const DEFAULT_HELP_TIMEOUT_MS = 5000;
+const MAX_HELP_BYTES = 256 * 1024;
+
+export function readGrokHelp(cwd, env = process.env, { timeoutMs = DEFAULT_HELP_TIMEOUT_MS } = {}) {
   const invocation = grokInvocation(["--help"], env);
-  const result = runCommand(invocation.command, invocation.args, { cwd, env });
+  const result = runCommand(invocation.command, invocation.args, { cwd, env, timeoutMs });
+  const stdout = String(result.stdout ?? "");
+  const byteLength = Buffer.byteLength(stdout, "utf8");
+  const ok = !result.error && result.status === 0 && stdout.trim().length > 0 && byteLength <= MAX_HELP_BYTES;
   return {
-    ok: !result.error && result.status === 0,
-    text: result.stdout || result.stderr || "",
+    ok,
+    text: ok ? stdout : "",
     result
   };
 }

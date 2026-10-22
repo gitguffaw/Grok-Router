@@ -1,4 +1,10 @@
+import path from "node:path";
+import process from "node:process";
 import { runCommand } from "./process.mjs";
+
+export function resolveCwd(options = {}) {
+  return options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
+}
 
 export function resolveWorkspaceRoot(cwd) {
   const result = runCommand("git", ["rev-parse", "--show-toplevel"], { cwd });

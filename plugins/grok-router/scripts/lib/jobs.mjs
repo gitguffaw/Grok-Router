@@ -124,6 +124,10 @@ export async function runTrackedJob(job, runner, options = {}) {
         return { apply: false, reason: "cancelled", job: current };
       }
       const status = execution.jobStatus ?? (execution.exitStatus === 0 ? "completed" : "failed");
+      const grokSessionId = execution.grokSessionId ?? null;
+      const resumeOf = typeof options.reconcileResumeOf === "function"
+        ? options.reconcileResumeOf(current, { ...execution, jobStatus: status, grokSessionId })
+        : (execution.resumeOf !== undefined ? execution.resumeOf : (current.resumeOf ?? null));
       return {
         apply: true,
         reason: "runner-terminal",
@@ -133,7 +137,8 @@ export async function runTrackedJob(job, runner, options = {}) {
           phase: execution.phase ?? (status === "completed" ? "done" : status),
           result: execution.payload,
           rendered: execution.rendered,
-          grokSessionId: execution.grokSessionId ?? null,
+          grokSessionId,
+          resumeOf,
           pid: null,
           completedAt: nowIso()
         }
