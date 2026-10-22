@@ -529,14 +529,94 @@ function payloadCut(words) {
   return cutAfter(0) ?? cutAfter(1) ?? words.length;
 }
 
+const MUTATING_SUBACTION_WORDS = new Set(
+  [...MUTATING_SUBACTIONS.values()].flatMap((actions) => [...actions])
+);
+
+function knownFlagSpelling(raw, grammar) {
+  if (!raw.startsWith("-") || raw === "-") {
+    return false;
+  }
+  const name = raw.startsWith("--") && raw.includes("=") ? raw.slice(0, raw.indexOf("=")) : raw;
+  if (!name.startsWith("--") && name.length !== 2) {
+    return false;
+  }
+  return grammar.valueFlags.has(name) || grammar.optionalValueFlags.has(name) || grammar.booleanFlags.has(name);
+}
+
+function consumedValueLooksUnknown(value, grammar) {
+  const parts = Array.isArray(value) ? value : [value];
+  return parts.some((part) => {
+    const raw = String(part ?? "");
+    return raw.startsWith("-") && raw !== "-" && !knownFlagSpelling(raw, grammar);
+  });
+}
+
+function hasUnknownOptionBeforeSeparator(tokens, grammar) {
+  for (const token of tokens) {
+    if (token.kind === "separator") {
+      break;
+    }
+    if (token.kind === "option" && token.canonical === null) {
+      return true;
+    }
+    // A required value flag consumes the next word even when that word is
+    // itself an option (`-m --future grok-4 login`). The grammar cannot prove
+    // grok did the same, so a value that looks like an unknown option leaves
+    // the boundary unresolved.
+    if (
+      token.kind === "option"
+      && token.value !== true
+      && token.value !== null
+      && token.value !== undefined
+      && consumedValueLooksUnknown(token.value, grammar)
+    ) {
+      return true;
+    }
+    if (token.kind === "positional") {
+      const raw = String(token.raw ?? "");
+      if (raw.startsWith("-") && raw !== "-" && !knownFlagSpelling(raw, grammar)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function wordIsMutatingKeyword(word, grammar) {
+  return grammar.mutatingCommands.has(word) || MUTATING_SUBACTION_WORDS.has(word);
+}
+
+function optionalValueIsMutating(tokens, grammar) {
+  for (const token of tokens) {
+    if (token.kind === "separator") {
+      break;
+    }
+    if (token.kind !== "option" || token.value === true || token.value === null || token.value === undefined) {
+      continue;
+    }
+    if (!grammar.optionalValueFlags.has(token.name)) {
+      continue;
+    }
+    if (wordIsMutatingKeyword(String(token.value), grammar)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function candidateSlotsMutating(tokens, grammar) {
-  // Grok's usage is [OPTIONS] [PROMPT] [COMMAND]. The first two plain words
-  // are both candidate commands. Dash tokens are unknown options: they do
-  // not occupy a candidate slot or a sub-action slot, so `sessions --future
-  // delete` still sees `delete`. Known payload (wrap child argv, sessions
-  // list/search terms, usage arguments) is not a candidate and is not a
-  // sub-action.
+  // An unknown option may or may not consume the next word, so slot counts
+  // and payload cuts after it are unresolved. Scan every plain token. With
+  // no unknown option, keep the two candidate slots and the payload cut.
+  // Optional -r/-w may also have consumed a command word (`-r login`).
   const words = plainWordsBeforeSeparator(tokens);
+  if (hasUnknownOptionBeforeSeparator(tokens, grammar)) {
+    return words.some((word) => wordIsMutatingKeyword(word, grammar));
+  }
+  if (optionalValueIsMutating(tokens, grammar)) {
+    return true;
+  }
   const end = payloadCut(words);
   const candidateCount = Math.min(2, end);
   for (let i = 0; i < candidateCount; i += 1) {
